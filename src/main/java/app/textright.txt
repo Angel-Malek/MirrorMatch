@@ -1,0 +1,4 @@
+Hi text is here
+bla bla bla
+some diff2
+extra diff
