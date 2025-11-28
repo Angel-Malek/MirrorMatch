@@ -27,15 +27,20 @@ public class CenterDiffGutter extends JComponent {
     private final JTextArea right;
     private ArrowHandler handler;
 
-    // A compact structure of arrow markers aligned to lines
     private static class Marker {
-        int line;        // zero-based line index (absolute in that side)
+        int line;
         boolean leftToRight; // true = ▶   false = ◀
-        int y;           // cached y pixel for quick hit-testing
-        Marker(int line, boolean l2r, int y) { this.line = line; this.leftToRight = l2r; this.y = y; }
+        Marker(int line, boolean l2r) { this.line = line; this.leftToRight = l2r; }
     }
 
-    private final List<Marker> markers = new ArrayList<>();
+    private static class VisibleMarker {
+        Marker marker;
+        int y; // center y relative to gutter
+        VisibleMarker(Marker m, int y) { this.marker = m; this.y = y; }
+    }
+
+    private final List<Marker> markersL2R = new ArrayList<>();
+    private final List<Marker> markersR2L = new ArrayList<>();
 
     // styling
     private final Color bg = new Color(245, 247, 252);
@@ -43,6 +48,7 @@ public class CenterDiffGutter extends JComponent {
     private final Color arrowL2R = new Color(76, 132, 255);   // blue-ish
     private final Color arrowR2L = new Color(168, 85, 247);   // violet-ish
     private final Font mono = new Font(Font.MONOSPACED, Font.PLAIN, 12);
+    private final Color stackGlow = new Color(120, 140, 200, 90);
 
     public CenterDiffGutter(JTextArea left, JTextArea right) {
         this.left = left;
@@ -56,12 +62,14 @@ public class CenterDiffGutter extends JComponent {
             @Override public void mouseClicked(MouseEvent e) {
                 if (handler == null) return;
                 int y = e.getY();
-                // find nearest marker (within same line band)
-                Marker hit = findMarkerAtY(y);
+                int x = e.getX();
+                // find nearest marker within its rendered pill bounds
+                Marker hit = findMarkerAtPoint(x, y);
                 if (hit == null) return;
                 boolean bulk = handler.isBulkMode();
-                if (hit.leftToRight) handler.onCopyLeftToRight(hit.line, bulk);
-                else handler.onCopyRightToLeft(hit.line, bulk);
+                int targetLine = mapClickToLine(hit, y);
+                if (hit.leftToRight) handler.onCopyLeftToRight(targetLine, bulk);
+                else handler.onCopyRightToLeft(targetLine, bulk);
             }
         });
     }
@@ -74,36 +82,28 @@ public class CenterDiffGutter extends JComponent {
      * for the “change-like” parts.
      */
     public void rebuildMarkers(List<DiffEngine.Hunk> hunks) {
-        markers.clear();
+        markersL2R.clear();
+        markersR2L.clear();
         try {
             javax.swing.text.Element rootL = left.getDocument().getDefaultRootElement();
             javax.swing.text.Element rootR = right.getDocument().getDefaultRootElement();
+
+            java.util.Set<Integer> leftLines = new java.util.LinkedHashSet<>();
+            java.util.Set<Integer> rightLines = new java.util.LinkedHashSet<>();
+
             int hl = hunks.size();
             int i = 0;
             while (i < hl) {
                 DiffEngine.Hunk h = hunks.get(i);
                 if (h.type() != DiffEngine.HunkType.EQUAL) {
-                    // LEFT side changed part
-                    int ls = h.leftStart();
-                    int le = h.leftEnd();
-                    int l = ls;
-                    while (l < le) {
-                        int y = lineToY(left, rootL, l);
-                        if (y >= 0) markers.add(new Marker(l, true, y)); // ▶
-                        l = l + 1;
-                    }
-                    // RIGHT side changed part
-                    int rs = h.rightStart();
-                    int re = h.rightEnd();
-                    int r = rs;
-                    while (r < re) {
-                        int y = lineToY(right, rootR, r);
-                        if (y >= 0) markers.add(new Marker(r, false, y)); // ◀
-                        r = r + 1;
-                    }
+                    rangeToList(h.leftStart(), h.leftEnd(), leftLines);
+                    rangeToList(h.rightStart(), h.rightEnd(), rightLines);
                 }
                 i = i + 1;
             }
+
+            for (int line : leftLines) markersL2R.add(new Marker(line, true));  // left -> right
+            for (int line : rightLines) markersR2L.add(new Marker(line, false)); // right -> left
         } catch (Exception ignored) {}
         repaint();
     }
@@ -120,22 +120,81 @@ public class CenterDiffGutter extends JComponent {
         }
     }
 
-    private Marker findMarkerAtY(int y) {
-        int tol = 8;
-        int m = markers.size();
-        int i = 0;
+    private void rangeToList(int start, int end, java.util.Set<Integer> into) {
+        int i = start;
+        while (i < end) {
+            into.add(i);
+            i = i + 1;
+        }
+    }
+
+    private Marker findMarkerAtPoint(int x, int y) {
+        int w = getWidth();
+        int laneW = Math.max(16, (w - 12) / 2);
+        int leftRx = 4;
+        int rightRx = leftRx + laneW + 4;
+        int pillH = 16;
         Marker best = null;
         int bestDy = Integer.MAX_VALUE;
-        while (i < m) {
-            Marker mk = markers.get(i);
-            int dy = Math.abs(mk.y - y);
-            if (dy < bestDy && dy <= tol) {
-                best = mk;
-                bestDy = dy;
+
+        List<VisibleMarker> vis = visibleMarkers();
+        int i = 0;
+        int n = vis.size();
+        while (i < n) {
+            VisibleMarker vm = vis.get(i);
+            int rx = vm.marker.leftToRight ? leftRx : rightRx;
+            int yMin = vm.y - (pillH / 2);
+            int yMax = vm.y + (pillH / 2);
+            int yCenter = vm.y;
+            if (x >= rx && x <= rx + laneW && y >= yMin && y <= yMax) {
+                int dy = Math.abs(yCenter - y);
+                if (dy < bestDy) {
+                    best = vm.marker;
+                    bestDy = dy;
+                }
             }
             i = i + 1;
         }
         return best;
+    }
+
+    private int mapClickToLine(Marker mk, int y) {
+        return mk.line;
+    }
+
+    private int visibleYOffset(boolean leftSide) {
+        Rectangle vr = (leftSide ? left : right).getVisibleRect();
+        return -vr.y;
+    }
+
+    private List<VisibleMarker> visibleMarkers() {
+        List<VisibleMarker> out = new ArrayList<>();
+        addVisibleForList(markersL2R, left, out);
+        addVisibleForList(markersR2L, right, out);
+        out.sort(java.util.Comparator.comparingInt(vm -> vm.y));
+        return out;
+    }
+
+    private void addVisibleForList(List<Marker> src, JTextArea area, List<VisibleMarker> out) {
+        int i = 0;
+        int n = src.size();
+        while (i < n) {
+            Marker mk = src.get(i);
+            try {
+                javax.swing.text.Element root = area.getDocument().getDefaultRootElement();
+                int lc = root.getElementCount();
+                if (lc <= 0) { i = i + 1; continue; }
+                int idx = Math.max(0, Math.min(mk.line, lc - 1));
+                Rectangle r = area.modelToView2D(root.getElement(idx).getStartOffset()).getBounds();
+                Point p = new Point(0, r.y + (r.height / 2));
+                SwingUtilities.convertPointToScreen(p, area);
+                SwingUtilities.convertPointFromScreen(p, this);
+                if (p.y > -40 && p.y < getHeight() + 40) {
+                    out.add(new VisibleMarker(mk, p.y));
+                }
+            } catch (Exception ignored) {}
+            i = i + 1;
+        }
     }
 
     @Override public void paintComponent(Graphics g) {
@@ -157,31 +216,95 @@ public class CenterDiffGutter extends JComponent {
             int rx = (w - pillW) / 2;
             int arc = 10;
 
-            int i = 0;
-            int n = markers.size();
-            while (i < n) {
-                Marker mk = markers.get(i);
-                int yCenter = mk.y;
+            List<VisibleMarker> vis = visibleMarkers();
+
+            int laneW = Math.max(16, (w - 12) / 2);
+            int leftRx = 4;
+            int rightRx = leftRx + laneW + 4;
+
+            drawLane(g2, vis, true, leftRx, laneW, pillH, arc);
+            drawLane(g2, vis, false, rightRx, laneW, pillH, arc);
+        } finally {
+            g2.dispose();
+        }
+    }
+
+    private void drawLane(Graphics2D g2, List<VisibleMarker> vis, boolean l2r, int rx, int laneW, int pillH, int arc) {
+        int i = 0;
+        int n = vis.size();
+        while (i < n) {
+            VisibleMarker vm = vis.get(i);
+            if (vm.marker.leftToRight != l2r) { i = i + 1; continue; }
+
+            int runStart = i;
+            int runEnd = i;
+            while (runEnd + 1 < n) {
+                VisibleMarker next = vis.get(runEnd + 1);
+                boolean sameDir = next.marker.leftToRight == l2r;
+                boolean consecutive = next.marker.line == vis.get(runEnd).marker.line + 1;
+                if (sameDir && consecutive) {
+                    runEnd = runEnd + 1;
+                } else {
+                    break;
+                }
+            }
+
+            if (runEnd > runStart) {
+                int spanTop = vis.get(runStart).y - (pillH / 2) - 6;
+                int spanBottom = vis.get(runEnd).y + (pillH / 2) + 6;
+                g2.setColor(stackGlow);
+                g2.fillRoundRect(rx, spanTop, laneW, spanBottom - spanTop, arc, arc);
+                g2.setColor(new Color(90, 105, 160, 80));
+                int hy = spanTop;
+                while (hy < spanBottom) {
+                    g2.drawLine(rx + 3, hy, rx + laneW - 3, hy + 6);
+                    hy = hy + 6;
+                }
+            }
+
+            int j = runStart;
+            while (j <= runEnd) {
+                VisibleMarker cur = vis.get(j);
+                int yCenter = cur.y;
                 int yTop = yCenter - (pillH / 2);
-                if (mk.leftToRight) g2.setColor(new Color(235, 243, 255));
+                int yBottom = yCenter + (pillH / 2);
+
+                if (cur.marker.leftToRight) g2.setColor(new Color(235, 243, 255));
                 else g2.setColor(new Color(243, 235, 255));
-                g2.fillRoundRect(rx, yTop, pillW, pillH, arc, arc);
+                g2.fillRoundRect(rx, yTop, laneW, pillH, arc, arc);
 
                 g2.setFont(mono);
-                if (mk.leftToRight) g2.setColor(arrowL2R);
+                if (cur.marker.leftToRight) g2.setColor(arrowL2R);
                 else g2.setColor(arrowR2L);
 
-                String arrow = mk.leftToRight ? "▶" : "◀";
+                String arrow = cur.marker.leftToRight ? "▶" : "◀";
                 int sw = g2.getFontMetrics().stringWidth(arrow);
                 int sh = g2.getFontMetrics().getAscent();
-                int tx = rx + (pillW - sw) / 2;
+                int tx = rx + (laneW - sw) / 2;
                 int ty = yTop + ((pillH + sh) / 2) - 2;
                 g2.drawString(arrow, tx, ty);
 
-                i = i + 1;
+                j = j + 1;
             }
-        } finally {
-            g2.dispose();
+
+            if (runEnd > runStart) {
+                int count = (runEnd - runStart) + 1;
+                VisibleMarker last = vis.get(runEnd);
+                int yBottom = last.y + (pillH / 2);
+                String label = String.valueOf(count);
+                int lw = g2.getFontMetrics().stringWidth(label);
+                int lh = g2.getFontMetrics().getAscent();
+                int badgeW = Math.max(14, lw + 8);
+                int badgeH = 14;
+                int bx = rx + laneW - badgeW - 4;
+                int by = yBottom + 2;
+                g2.setColor(new Color(50, 60, 90, 210));
+                g2.fillRoundRect(bx, by, badgeW, badgeH, 8, 8);
+                g2.setColor(Color.WHITE);
+                g2.drawString(label, bx + (badgeW - lw) / 2, by + ((badgeH + lh) / 2) - 2);
+            }
+
+            i = runEnd + 1;
         }
     }
 }

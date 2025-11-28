@@ -12,6 +12,7 @@ public class LineNumberGutter extends JComponent implements DocumentListener, Pr
     private final JTextArea textArea;
     private final Font mono = new Font(Font.MONOSPACED, Font.PLAIN, 12);
     private int lineCountCache = 1;
+    private java.util.Set<Integer> focusLines = java.util.Set.of();
 
     public LineNumberGutter(JTextArea textArea) {
         this.textArea = textArea;
@@ -32,6 +33,11 @@ public class LineNumberGutter extends JComponent implements DocumentListener, Pr
         revalidate();
     }
 
+    public void setFocusLines(java.util.Collection<Integer> lines) {
+        focusLines = new java.util.HashSet<>(lines);
+        repaint();
+    }
+
     @Override public void paintComponent(Graphics g) {
         super.paintComponent(g);
         Rectangle clip = g.getClipBounds();
@@ -50,7 +56,15 @@ public class LineNumberGutter extends JComponent implements DocumentListener, Pr
                 int y = textArea.modelToView2D(start).getBounds().y;
                 String label = String.valueOf(line + 1);
                 int ascent = getFontMetrics(mono).getAscent();
-                g.drawString(label, getWidth() - 10 - getFontMetrics(mono).stringWidth(label), y + ascent);
+                int textX = getWidth() - 10 - getFontMetrics(mono).stringWidth(label);
+                if (focusLines.contains(line)) {
+                    int bandH = Math.max(getFontMetrics(mono).getHeight(), 14);
+                    int bandY = y;
+                    g.setColor(new Color(200, 215, 245, 180));
+                    g.fillRect(clip.x, bandY, getWidth(), bandH);
+                    g.setColor(getForeground());
+                }
+                g.drawString(label, textX, y + ascent);
                 start = textArea.getLineEndOffset(line) + 1;
             } catch (Exception ex) {
                 break;
