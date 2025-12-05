@@ -40,11 +40,16 @@ public class MirrorMatchApp extends JFrame {
     private final java.util.List<Object> focusRightTags = new java.util.ArrayList<>();
     private final Highlighter.HighlightPainter focusPainter =
             new UnderlineHatchPainter(new Color(120, 160, 255, 120));
+    private final Highlighter.HighlightPainter inlinePainter =
+            new DefaultHighlighter.DefaultHighlightPainter(new Color(200, 215, 255, 150));
+    private int editorFontSize = 14;
+    private String themeName = "Light";
 
     private final JLabel status = new JLabel("Ready.");
     private final JCheckBox syncScroll = new JCheckBox("Sync scroll", true);
     private final JToggleButton diffOnlyToggle = new JToggleButton("Diff only");
     private final JToggleButton chunkModeToggle = new JToggleButton("Chunk copy");
+    private final JToggleButton ignoreWsToggle = new JToggleButton("Ignore whitespace");
     private final JToggleButton autoSaveToggle = new JToggleButton("Auto-save");
 
     private final JButton prevBtn = new JButton("◀ Prev");
@@ -146,6 +151,7 @@ public class MirrorMatchApp extends JFrame {
         tools.add(syncScroll);
         tools.add(diffOnlyToggle);
         tools.add(chunkModeToggle);
+        tools.add(ignoreWsToggle);
         tools.addSeparator();
         tools.add(autoSaveToggle);
         tools.add(undoAny);
@@ -177,6 +183,7 @@ public class MirrorMatchApp extends JFrame {
         undoRight.addActionListener(e -> undoSide(false));
         undoAny.addActionListener(e -> undoLastAnySide());
         diffOnlyToggle.addActionListener(e -> toggleDiffOnlyView());
+        ignoreWsToggle.addActionListener(e -> recompute());
 
         centerGutter.setHandler(new CenterDiffGutter.ArrowHandler() {
             @Override public void onCopyLeftToRight(int lineIndex, boolean bulk) {
@@ -212,11 +219,12 @@ public class MirrorMatchApp extends JFrame {
         setLocationRelativeTo(null);
 
         loadSampleDefaults();
+        applyFontSize(editorFontSize);
+        applyTheme(themeName);
     }
 
     private static JTextArea createEditor() {
         JTextArea area = new JTextArea();
-        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14));
         area.setTabSize(4);
         area.setLineWrap(false);
         area.setMargin(new Insets(8, 10, 8, 10));
@@ -316,6 +324,10 @@ public class MirrorMatchApp extends JFrame {
         JMenuItem recomputeItem = new JMenuItem("Recompute Diff");
         recomputeItem.addActionListener(e -> recompute());
         view.add(recomputeItem);
+        JMenuItem prefsItem = new JMenuItem("Preferences…");
+        prefsItem.addActionListener(e -> openPreferences());
+        view.addSeparator();
+        view.add(prefsItem);
 
         mb.add(file);
         mb.add(view);
@@ -435,6 +447,66 @@ public class MirrorMatchApp extends JFrame {
         if (!changes.isEmpty() && currentIndex >= 0 && currentIndex < changes.size()) {
             highlightCurrentHunk(changes.get(currentIndex));
         }
+    }
+
+    private void addInlineHighlights() {
+        int n = currentDiff.hunks.size();
+        int i = 0;
+        while (i < n) {
+            Hunk h = currentDiff.hunks.get(i);
+            if (h.type() == HunkType.CHANGE) {
+                int leftSpan = h.leftEnd() - h.leftStart();
+                int rightSpan = h.rightEnd() - h.rightStart();
+                int pairs = Math.min(leftSpan, rightSpan);
+                int j = 0;
+                while (j < pairs) {
+                    int li = h.leftStart() + j;
+                    int ri = h.rightStart() + j;
+                    String l = safeLine(leftLines, li);
+                    String r = safeLine(rightLines, ri);
+                    InlineSpan span = computeInlineSpan(l, r);
+                    if (span != null) {
+                        highlightWord(leftArea, li, span.start, span.endLeft, inlinePainter);
+                        highlightWord(rightArea, ri, span.start, span.endRight, inlinePainter);
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+
+    private record InlineSpan(int start, int endLeft, int endRight) {}
+
+    private InlineSpan computeInlineSpan(String l, String r) {
+        int lenL = l.length();
+        int lenR = r.length();
+        int min = Math.min(lenL, lenR);
+        int prefix = 0;
+        while (prefix < min && l.charAt(prefix) == r.charAt(prefix)) {
+            prefix = prefix + 1;
+        }
+        int suffix = 0;
+        while (suffix < min - prefix && l.charAt(lenL - 1 - suffix) == r.charAt(lenR - 1 - suffix)) {
+            suffix = suffix + 1;
+        }
+        int start = prefix;
+        int endL = lenL - suffix;
+        int endR = lenR - suffix;
+        if (start >= endL && start >= endR) return null;
+        return new InlineSpan(start, endL, endR);
+    }
+
+    private void highlightWord(JTextArea area, int lineIndex, int colStart, int colEnd, Highlighter.HighlightPainter painter) {
+        try {
+            int lineOffset = area.getLineStartOffset(Math.max(0, Math.min(lineIndex, area.getLineCount() - 1)));
+            int lineLen = Math.max(0, safeLine(area == leftArea ? leftLines : rightLines, lineIndex).length());
+            int s = lineOffset + Math.max(0, Math.min(colStart, lineLen));
+            int e = lineOffset + Math.max(0, Math.min(colEnd, lineLen));
+            if (e > s) {
+                area.getHighlighter().addHighlight(s, e, painter);
+            }
+        } catch (Exception ignored) {}
     }
 
     private void refreshDiffOnlyView() {
@@ -571,6 +643,92 @@ public class MirrorMatchApp extends JFrame {
             } catch (Exception ignored) {}
             i = i + 1;
         }
+    }
+
+    private void openPreferences() {
+        JDialog dialog = new JDialog(this, "Preferences", true);
+        dialog.setLayout(new GridBagLayout());
+        GridBagConstraints gc = new GridBagConstraints();
+        gc.insets = new Insets(6, 8, 6, 8);
+        gc.anchor = GridBagConstraints.WEST;
+
+        JLabel fontLbl = new JLabel("Editor font size:");
+        JSpinner fontSpinner = new JSpinner(new SpinnerNumberModel(editorFontSize, 10, 32, 1));
+
+        JLabel themeLbl = new JLabel("Theme:");
+        JComboBox<String> themeBox = new JComboBox<>(new String[]{"Light", "Soft Dark"});
+        themeBox.setSelectedItem(themeName);
+
+        gc.gridx = 0; gc.gridy = 0;
+        dialog.add(fontLbl, gc);
+        gc.gridx = 1;
+        dialog.add(fontSpinner, gc);
+
+        gc.gridx = 0; gc.gridy = 1;
+        dialog.add(themeLbl, gc);
+        gc.gridx = 1;
+        dialog.add(themeBox, gc);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton ok = new JButton("OK");
+        JButton cancel = new JButton("Cancel");
+        buttons.add(cancel);
+        buttons.add(ok);
+        gc.gridx = 0; gc.gridy = 2; gc.gridwidth = 2;
+        gc.anchor = GridBagConstraints.EAST;
+        dialog.add(buttons, gc);
+
+        ok.addActionListener(e -> {
+            editorFontSize = (int) fontSpinner.getValue();
+            themeName = (String) themeBox.getSelectedItem();
+            applyFontSize(editorFontSize);
+            applyTheme(themeName);
+            dialog.dispose();
+        });
+        cancel.addActionListener(e -> dialog.dispose());
+
+        dialog.pack();
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    private void applyFontSize(int size) {
+        Font main = new Font(Font.MONOSPACED, Font.PLAIN, size);
+        leftArea.setFont(main);
+        rightArea.setFont(main);
+        gutterLeft.setFont(main);
+        gutterRight.setFont(main);
+        Font diffFont = new Font("IBM Plex Mono", Font.PLAIN, Math.max(10, size - 1));
+        leftDiffView.setFont(diffFont);
+        rightDiffView.setFont(diffFont);
+    }
+
+    private void applyTheme(String theme) {
+        boolean dark = "Soft Dark".equalsIgnoreCase(theme);
+        Color bgEditor = dark ? new Color(28, 32, 38) : new Color(250, 251, 254);
+        Color fgEditor = dark ? new Color(230, 232, 236) : Color.BLACK;
+        Color gutterBg = dark ? new Color(38, 43, 50) : new Color(245, 245, 245);
+        Color gutterFg = dark ? new Color(190, 195, 205) : new Color(120, 120, 120);
+        Color panelBg = dark ? new Color(32, 36, 44) : new Color(245, 247, 252);
+
+        applyAreaTheme(leftArea, bgEditor, fgEditor);
+        applyAreaTheme(rightArea, bgEditor, fgEditor);
+        applyAreaTheme(leftDiffView, bgEditor, fgEditor);
+        applyAreaTheme(rightDiffView, bgEditor, fgEditor);
+
+        gutterLeft.setBackground(gutterBg);
+        gutterLeft.setForeground(gutterFg);
+        gutterRight.setBackground(gutterBg);
+        gutterRight.setForeground(gutterFg);
+
+        getContentPane().setBackground(panelBg);
+    }
+
+    private void applyAreaTheme(JTextArea area, Color bg, Color fg) {
+        area.setBackground(bg);
+        area.setForeground(fg);
+        area.getCaret().setVisible(true);
+        area.getCaret().setBlinkRate(500);
     }
 
     /** Painter that draws a semi-transparent hatch to sit atop existing diff colors. */
@@ -890,6 +1048,7 @@ public class MirrorMatchApp extends JFrame {
     private void startDiffInBackground() {
         final String leftText = leftArea.getText();
         final String rightText = rightArea.getText();
+        final boolean ignoreWS = ignoreWsToggle.isSelected();
 
         if (leftText.length() > 2000000 || rightText.length() > 2000000) {
             setStatus("Large file mode: View → Recompute Diff");
@@ -903,7 +1062,10 @@ public class MirrorMatchApp extends JFrame {
         setStatus("Computing diff…");
         diffWorker = new SwingWorker<>() {
             @Override protected DiffEngine.Result doInBackground() {
-                return DiffEngine.diffLinesFast(leftText, rightText);
+                java.util.function.Function<String, String> norm = ignoreWS
+                        ? s -> s.replaceAll("\\s+", "")
+                        : java.util.function.Function.identity();
+                return DiffEngine.diffLinesNormalized(leftText, rightText, norm);
             }
             @Override protected void done() {
                 if (isCancelled()) return;
@@ -920,6 +1082,7 @@ public class MirrorMatchApp extends JFrame {
                         }
                     }
                     refreshHighlights();
+                    addInlineHighlights();
                     if (currentIndex >= 0) {
                         gotoDiff(currentIndex);
                     } else {

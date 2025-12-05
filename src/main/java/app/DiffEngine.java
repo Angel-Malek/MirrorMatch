@@ -47,8 +47,17 @@ public class DiffEngine {
 
     /** Faster line-based diff using Myers O(ND) with line hashing. */
     public static Result diffLinesFast(String left, String right) {
+        return diffLinesNormalized(left, right, s -> s);
+    }
+
+    public static Result diffLinesNormalized(String left, String right, java.util.function.Function<String, String> normalizer) {
         List<String> L = splitFast(left);
         List<String> R = splitFast(right);
+
+        if (normalizer != null) {
+            L = normalizeList(L, normalizer);
+            R = normalizeList(R, normalizer);
+        }
 
         // Map lines to ints to speed equality checks
         IntMapper mapper = new IntMapper();
@@ -58,6 +67,17 @@ public class DiffEngine {
         List<Op> ops = myers(a, b); // EQUAL/DELETE/INSERT runs
         List<Hunk> hunks = coalesceToHunks(ops);
         return new Result(hunks);
+    }
+
+    private static List<String> normalizeList(List<String> src, java.util.function.Function<String, String> norm) {
+        List<String> out = new ArrayList<>(src.size());
+        int i = 0;
+        int n = src.size();
+        while (i < n) {
+            out.add(norm.apply(src.get(i)));
+            i = i + 1;
+        }
+        return out;
     }
 
     /* ===================== Helpers ===================== */
