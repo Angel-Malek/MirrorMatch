@@ -39,8 +39,16 @@ public class CenterDiffGutter extends JComponent {
         VisibleMarker(Marker m, int y) { this.marker = m; this.y = y; }
     }
 
+    private static class MarkerRun {
+        Marker marker;
+        int yCenter;
+        int count;
+        MarkerRun(Marker m, int y, int count) { this.marker = m; this.yCenter = y; this.count = count; }
+    }
+
     private final List<Marker> markersL2R = new ArrayList<>();
     private final List<Marker> markersR2L = new ArrayList<>();
+    private boolean groupRuns = false;
 
     // styling
     private final Color bg = new Color(245, 247, 252);
@@ -72,6 +80,11 @@ public class CenterDiffGutter extends JComponent {
                 else handler.onCopyRightToLeft(targetLine, bulk);
             }
         });
+    }
+
+    public void setGroupRuns(boolean groupRuns) {
+        this.groupRuns = groupRuns;
+        repaint();
     }
 
     public void setHandler(ArrowHandler handler) { this.handler = handler; }
@@ -134,26 +147,52 @@ public class CenterDiffGutter extends JComponent {
         int leftRx = 4;
         int rightRx = leftRx + laneW + 4;
         int pillH = 16;
+
+        List<VisibleMarker> vis = visibleMarkers();
+        if (!groupRuns) {
+            Marker best = null;
+            int bestDy = Integer.MAX_VALUE;
+            int i = 0;
+            int n = vis.size();
+            while (i < n) {
+                VisibleMarker vm = vis.get(i);
+                int rx = vm.marker.leftToRight ? leftRx : rightRx;
+                int yMin = vm.y - (pillH / 2);
+                int yMax = vm.y + (pillH / 2);
+                int yCenter = vm.y;
+                if (x >= rx && x <= rx + laneW && y >= yMin && y <= yMax) {
+                    int dy = Math.abs(yCenter - y);
+                    if (dy < bestDy) {
+                        best = vm.marker;
+                        bestDy = dy;
+                    }
+                }
+                i = i + 1;
+            }
+            return best;
+        }
+
+        List<MarkerRun> leftRuns = runsFor(vis, true, pillH);
+        List<MarkerRun> rightRuns = runsFor(vis, false, pillH);
+
         Marker best = null;
         int bestDy = Integer.MAX_VALUE;
 
-        List<VisibleMarker> vis = visibleMarkers();
-        int i = 0;
-        int n = vis.size();
-        while (i < n) {
-            VisibleMarker vm = vis.get(i);
-            int rx = vm.marker.leftToRight ? leftRx : rightRx;
-            int yMin = vm.y - (pillH / 2);
-            int yMax = vm.y + (pillH / 2);
-            int yCenter = vm.y;
-            if (x >= rx && x <= rx + laneW && y >= yMin && y <= yMax) {
-                int dy = Math.abs(yCenter - y);
-                if (dy < bestDy) {
-                    best = vm.marker;
-                    bestDy = dy;
-                }
+        for (MarkerRun run : leftRuns) {
+            int yMin = run.yCenter - (pillH / 2);
+            int yMax = run.yCenter + (pillH / 2);
+            if (x >= leftRx && x <= leftRx + laneW && y >= yMin && y <= yMax) {
+                int dy = Math.abs(run.yCenter - y);
+                if (dy < bestDy) { best = run.marker; bestDy = dy; }
             }
-            i = i + 1;
+        }
+        for (MarkerRun run : rightRuns) {
+            int yMin = run.yCenter - (pillH / 2);
+            int yMax = run.yCenter + (pillH / 2);
+            if (x >= rightRx && x <= rightRx + laneW && y >= yMin && y <= yMax) {
+                int dy = Math.abs(run.yCenter - y);
+                if (dy < bestDy) { best = run.marker; bestDy = dy; }
+            }
         }
         return best;
     }
@@ -197,6 +236,34 @@ public class CenterDiffGutter extends JComponent {
         }
     }
 
+    private List<MarkerRun> runsFor(List<VisibleMarker> vis, boolean l2r, int pillH) {
+        List<MarkerRun> runs = new ArrayList<>();
+        int i = 0;
+        int n = vis.size();
+        while (i < n) {
+            VisibleMarker vm = vis.get(i);
+            if (vm.marker.leftToRight != l2r) { i = i + 1; continue; }
+
+            int runStart = i;
+            int runEnd = i;
+            while (runEnd + 1 < n) {
+                VisibleMarker next = vis.get(runEnd + 1);
+                boolean sameDir = next.marker.leftToRight == l2r;
+                boolean consecutive = next.marker.line == vis.get(runEnd).marker.line + 1;
+                if (sameDir && consecutive) runEnd = runEnd + 1;
+                else break;
+            }
+
+            int startY = vis.get(runStart).y;
+            int endY = vis.get(runEnd).y;
+            int yCenter = (startY + endY) / 2;
+            int count = (runEnd - runStart) + 1;
+            runs.add(new MarkerRun(vis.get(runStart).marker, yCenter, count));
+            i = runEnd + 1;
+        }
+        return runs;
+    }
+
     @Override public void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2 = (Graphics2D) g.create();
@@ -230,81 +297,58 @@ public class CenterDiffGutter extends JComponent {
     }
 
     private void drawLane(Graphics2D g2, List<VisibleMarker> vis, boolean l2r, int rx, int laneW, int pillH, int arc) {
-        int i = 0;
-        int n = vis.size();
-        while (i < n) {
-            VisibleMarker vm = vis.get(i);
-            if (vm.marker.leftToRight != l2r) { i = i + 1; continue; }
-
-            int runStart = i;
-            int runEnd = i;
-            while (runEnd + 1 < n) {
-                VisibleMarker next = vis.get(runEnd + 1);
-                boolean sameDir = next.marker.leftToRight == l2r;
-                boolean consecutive = next.marker.line == vis.get(runEnd).marker.line + 1;
-                if (sameDir && consecutive) {
-                    runEnd = runEnd + 1;
-                } else {
-                    break;
-                }
-            }
-
-            if (runEnd > runStart) {
-                int spanTop = vis.get(runStart).y - (pillH / 2) - 6;
-                int spanBottom = vis.get(runEnd).y + (pillH / 2) + 6;
-                g2.setColor(stackGlow);
-                g2.fillRoundRect(rx, spanTop, laneW, spanBottom - spanTop, arc, arc);
-                g2.setColor(new Color(90, 105, 160, 80));
-                int hy = spanTop;
-                while (hy < spanBottom) {
-                    g2.drawLine(rx + 3, hy, rx + laneW - 3, hy + 6);
-                    hy = hy + 6;
-                }
-            }
-
-            int j = runStart;
-            while (j <= runEnd) {
-                VisibleMarker cur = vis.get(j);
-                int yCenter = cur.y;
+        if (!groupRuns) {
+            int i = 0;
+            int n = vis.size();
+            while (i < n) {
+                VisibleMarker vm = vis.get(i);
+                if (vm.marker.leftToRight != l2r) { i = i + 1; continue; }
+                int yCenter = vm.y;
                 int yTop = yCenter - (pillH / 2);
-                int yBottom = yCenter + (pillH / 2);
-
-                if (cur.marker.leftToRight) g2.setColor(new Color(235, 243, 255));
+                if (l2r) g2.setColor(new Color(235, 243, 255));
                 else g2.setColor(new Color(243, 235, 255));
                 g2.fillRoundRect(rx, yTop, laneW, pillH, arc, arc);
 
                 g2.setFont(mono);
-                if (cur.marker.leftToRight) g2.setColor(arrowL2R);
-                else g2.setColor(arrowR2L);
-
-                String arrow = cur.marker.leftToRight ? "▶" : "◀";
+                g2.setColor(l2r ? arrowL2R : arrowR2L);
+                String arrow = l2r ? "▶" : "◀";
                 int sw = g2.getFontMetrics().stringWidth(arrow);
                 int sh = g2.getFontMetrics().getAscent();
                 int tx = rx + (laneW - sw) / 2;
                 int ty = yTop + ((pillH + sh) / 2) - 2;
                 g2.drawString(arrow, tx, ty);
-
-                j = j + 1;
+                i = i + 1;
             }
+            return;
+        }
 
-            if (runEnd > runStart) {
-                int count = (runEnd - runStart) + 1;
-                VisibleMarker last = vis.get(runEnd);
-                int yBottom = last.y + (pillH / 2);
-                String label = String.valueOf(count);
+        List<MarkerRun> runs = runsFor(vis, l2r, pillH);
+        for (MarkerRun run : runs) {
+            int yCenter = run.yCenter;
+            int yTop = yCenter - (pillH / 2);
+            int count = run.count;
+
+            if (l2r) g2.setColor(new Color(235, 243, 255));
+            else g2.setColor(new Color(243, 235, 255));
+            g2.fillRoundRect(rx, yTop, laneW, pillH, arc, arc);
+
+            g2.setFont(mono);
+            g2.setColor(l2r ? arrowL2R : arrowR2L);
+            String arrow = l2r ? "▶" : "◀";
+            int sw = g2.getFontMetrics().stringWidth(arrow);
+            int sh = g2.getFontMetrics().getAscent();
+            int tx = rx + 6;
+            int ty = yTop + ((pillH + sh) / 2) - 2;
+            g2.drawString(arrow, tx, ty);
+
+            if (count > 1) {
+                String label = "×" + count;
                 int lw = g2.getFontMetrics().stringWidth(label);
                 int lh = g2.getFontMetrics().getAscent();
-                int badgeW = Math.max(14, lw + 8);
-                int badgeH = 14;
-                int bx = rx + laneW - badgeW - 4;
-                int by = yBottom + 2;
-                g2.setColor(new Color(50, 60, 90, 210));
-                g2.fillRoundRect(bx, by, badgeW, badgeH, 8, 8);
-                g2.setColor(Color.WHITE);
-                g2.drawString(label, bx + (badgeW - lw) / 2, by + ((badgeH + lh) / 2) - 2);
+                int bx = tx + sw + 4;
+                int by = yTop + ((pillH + lh) / 2) - 2;
+                g2.drawString(label, bx, by);
             }
-
-            i = runEnd + 1;
         }
     }
 }

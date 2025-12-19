@@ -24,6 +24,7 @@ dependencies {
     testImplementation 'junit:junit:4.13.1'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.8.1'
     implementation 'com.formdev:flatlaf:3.4'
+    implementation 'org.apache.poi:poi-ooxml:5.2.5'
 }
 
 tasks.named('jar') {
@@ -31,4 +32,21 @@ tasks.named('jar') {
         attributes('Main-Class': 'app.MirrorMatchApp')
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.register('uberJar', Jar) {
+    group = 'distribution'
+    description = 'Builds a runnable jar with all dependencies bundled.'
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes('Main-Class': 'app.MirrorMatchApp')
+    }
+    from(sourceSets.main.output)
+    dependsOn(configurations.runtimeClasspath)
+    from {
+        configurations.runtimeClasspath.get()
+                .filter { it.name.endsWith('jar') }
+                .collect { zipTree(it) }
+    }
 }

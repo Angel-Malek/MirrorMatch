@@ -4,7 +4,6 @@ import javax.swing.*;
 import java.awt.Component;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -68,8 +67,8 @@ class FileDropHandler extends TransferHandler {
             if (paths.size() >= 2) {
                 Path p1 = paths.get(0);
                 Path p2 = paths.get(1);
-                String t1 = Files.readString(p1);
-                String t2 = Files.readString(p2);
+                FileContentLoader.LoadedContent t1 = FileContentLoader.load(p1);
+                FileContentLoader.LoadedContent t2 = FileContentLoader.load(p2);
                 if (primaryLeft) {
                     app.handleBothDrop(p1, t1, p2, t2);
                 } else {
@@ -81,7 +80,7 @@ class FileDropHandler extends TransferHandler {
 
             // only one file
             Path p = paths.get(0);
-            String content = Files.readString(p);
+            FileContentLoader.LoadedContent content = FileContentLoader.load(p);
 
             boolean finalLeft;
             if (overLeft) {

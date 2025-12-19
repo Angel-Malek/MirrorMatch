@@ -2,6 +2,7 @@ package app;
 
 import javax.swing.*;
 import javax.swing.BorderFactory;
+import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
@@ -14,6 +15,7 @@ import javax.swing.text.JTextComponent;
 import javax.swing.undo.CannotUndoException;
 import javax.swing.undo.UndoManager;
 import java.awt.*;
+import java.awt.image.BufferedImage;
 import java.awt.event.ActionEvent;
 import java.awt.event.AdjustmentEvent;
 import java.awt.event.AdjustmentListener;
@@ -22,10 +24,12 @@ import java.awt.Toolkit;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.Iterator;
+import java.util.*;
 import java.util.List;
+
+import app.FileContentLoader;
+
+import app.FileContentLoader;
 
 import static app.DiffEngine.*;
 
@@ -61,6 +65,8 @@ public class MirrorMatchApp extends JFrame {
     private final JButton undoLeft = new JButton("Undo L");
     private final JButton undoRight = new JButton("Undo R");
     private final JButton undoAny = new JButton("Undo (⌘/Ctrl+Z)");
+    private final JLabel headerLeft = createHeaderLabel("Left");
+    private final JLabel headerRight = createHeaderLabel("Right");
 
     private List<String> leftLines = List.of("");
     private List<String> rightLines = List.of("");
@@ -81,6 +87,7 @@ public class MirrorMatchApp extends JFrame {
     private final javax.swing.event.UndoableEditListener leftRecorder = e -> { if (!suppressUndoCapture) recordEdit(true); };
     private final javax.swing.event.UndoableEditListener rightRecorder = e -> { if (!suppressUndoCapture) recordEdit(false); };
     private final Deque<Boolean> undoStack = new ArrayDeque<>();
+    private boolean collapsedMode = false;
 
     private enum Side { LEFT, RIGHT, BOTH }
 
@@ -116,7 +123,7 @@ public class MirrorMatchApp extends JFrame {
         rightScroll.setRowHeaderView(gutterRight);
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                wrapEditor(leftScroll, "Left"), wrapEditor(rightScroll, "Right"));
+                wrapEditor(leftScroll, headerLeft, "Left"), wrapEditor(rightScroll, headerRight, "Right"));
         split.setResizeWeight(0.5);
         split.setDividerSize(48);
         attachCenterGutter(split, centerGutter);
@@ -126,8 +133,8 @@ public class MirrorMatchApp extends JFrame {
         leftDiffScroll.setRowHeaderView(new LineNumberGutter(leftDiffView));
         rightDiffScroll.setRowHeaderView(new LineNumberGutter(rightDiffView));
         JSplitPane diffSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                wrapEditor(leftDiffScroll, "Changes (L)"),
-                wrapEditor(rightDiffScroll, "Changes (R)"));
+                wrapEditor(leftDiffScroll, createHeaderLabel("Changes (L)"), "Changes (L)"),
+                wrapEditor(rightDiffScroll, createHeaderLabel("Changes (R)"), "Changes (R)"));
         diffSplit.setResizeWeight(0.5);
         diffSplit.setDividerSize(12);
         diffSplit.setEnabled(false);
@@ -221,6 +228,8 @@ public class MirrorMatchApp extends JFrame {
         loadSampleDefaults();
         applyFontSize(editorFontSize);
         applyTheme(themeName);
+        refreshHeaders();
+
     }
 
     private static JTextArea createEditor() {
@@ -251,23 +260,76 @@ public class MirrorMatchApp extends JFrame {
         return sp;
     }
 
-    private JPanel wrapEditor(JScrollPane scroll, String title) {
+    private JPanel wrapEditor(JScrollPane scroll, JLabel header, String fallbackTitle) {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createCompoundBorder(
                 new EmptyBorder(6, 6, 6, 6),
                 BorderFactory.createLineBorder(new Color(230, 232, 238), 1, true)
         ));
 
-        JLabel header = new JLabel("  " + title.toUpperCase());
-        header.setFont(header.getFont().deriveFont(Font.BOLD, 12f));
-        header.setForeground(new Color(90, 95, 115));
-        header.setBorder(new EmptyBorder(6, 4, 4, 4));
-        header.setIcon(UIManager.getIcon("FileView.fileIcon"));
+        header.setText("  " + fallbackTitle.toUpperCase());
 
         panel.add(header, BorderLayout.NORTH);
         panel.add(scroll, BorderLayout.CENTER);
         panel.setBackground(new Color(245, 247, 252));
         return panel;
+    }
+
+    private JLabel createHeaderLabel(String fallbackTitle) {
+        JLabel header = new JLabel("  " + fallbackTitle.toUpperCase());
+        header.setFont(header.getFont().deriveFont(Font.BOLD, 12f));
+        header.setForeground(new Color(90, 95, 115));
+        header.setBorder(new EmptyBorder(6, 4, 4, 4));
+        header.setHorizontalAlignment(SwingConstants.LEFT);
+        header.setIcon(iconForPath(null));
+        return header;
+    }
+
+    private void refreshHeaders() {
+        setHeaderInfo(headerLeft, leftPath, "Left");
+        setHeaderInfo(headerRight, rightPath, "Right");
+    }
+
+    private void setHeaderInfo(JLabel header, Path path, String fallback) {
+        String name = path != null ? path.getFileName().toString() : fallback;
+        header.setText("  " + name);
+        header.setIcon(iconForPath(path));
+        header.setToolTipText(path != null ? path.toString() : null);
+    }
+
+    private Icon iconForPath(Path path) {
+        String name = path != null ? path.getFileName().toString().toLowerCase() : "";
+        if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+            return letterIcon('X', new Color(56, 142, 60), Color.WHITE);
+        }
+        if (name.endsWith(".doc") || name.endsWith(".docx")) {
+            return letterIcon('W', new Color(33, 150, 243), Color.WHITE);
+        }
+        Icon sys = UIManager.getIcon("FileView.fileIcon");
+        return sys != null ? sys : letterIcon('F', new Color(90, 95, 115), Color.WHITE);
+    }
+
+    private Icon letterIcon(char letter, Color bg, Color fg) {
+        int size = 16;
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = img.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setColor(bg);
+            g.fillRoundRect(0, 0, size - 1, size - 1, 4, 4);
+            g.setColor(new Color(0, 0, 0, 40));
+            g.drawRoundRect(0, 0, size - 1, size - 1, 4, 4);
+            g.setColor(fg);
+            Font f = new Font("SansSerif", Font.BOLD, 11);
+            g.setFont(f);
+            FontMetrics fm = g.getFontMetrics();
+            int x = (size - fm.charWidth(Character.toUpperCase(letter))) / 2;
+            int y = (size + fm.getAscent() - fm.getDescent()) / 2;
+            g.drawString(String.valueOf(Character.toUpperCase(letter)), x, y);
+        } finally {
+            g.dispose();
+        }
+        return new ImageIcon(img);
     }
 
     private void attachCenterGutter(JSplitPane split, JComponent gutter) {
@@ -339,18 +401,19 @@ public class MirrorMatchApp extends JFrame {
         if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             Path p = fc.getSelectedFile().toPath();
             try {
-                String content = Files.readString(p);
-                area.setText(content);
+                FileContentLoader.LoadedContent payload = FileContentLoader.load(p);
+                area.setText(payload.text());
                 resetUndoHistory(left ? Side.LEFT : Side.RIGHT);
                 if (left) {
                     leftPath = p;
                     setStatus("Opened LEFT: " + p);
-                    lastSavedLeft = content;
+                    lastSavedLeft = payload.text();
                 } else {
                     rightPath = p;
                     setStatus("Opened RIGHT: " + p);
-                    lastSavedRight = content;
+                    lastSavedRight = payload.text();
                 }
+                refreshHeaders();
                 recompute();
             } catch (IOException ex) {
                 error("Failed to read: " + p + " – " + ex.getMessage());
@@ -374,8 +437,10 @@ public class MirrorMatchApp extends JFrame {
             Files.writeString(target, area.getText());
             if (left) {
                 lastSavedLeft = area.getText();
+                refreshHeaders();
             } else {
                 lastSavedRight = area.getText();
+                refreshHeaders();
             }
             setStatus("Saved " + (left ? "LEFT" : "RIGHT") + " → " + target);
         } catch (IOException ex) {
@@ -1144,6 +1209,7 @@ public class MirrorMatchApp extends JFrame {
                 lastSavedLeft = lt;
                 lastSavedRight = rt;
                 resetUndoHistory(Side.BOTH);
+                refreshHeaders();
                 recompute();
                 setStatus("Loaded sample-left.txt and sample-right.txt");
             } catch (IOException ignored) {}
@@ -1165,29 +1231,33 @@ public class MirrorMatchApp extends JFrame {
     JTextArea getLeftArea() { return leftArea; }
     JTextArea getRightArea() { return rightArea; }
 
-    void handleSingleDrop(boolean leftSide, Path p, String content) {
+    void handleSingleDrop(boolean leftSide, Path p, FileContentLoader.LoadedContent payload) {
+        String content = payload.text();
         if (leftSide) {
             leftArea.setText(content);
             leftPath = p;
             resetUndoHistory(Side.LEFT);
             lastSavedLeft = content;
+            refreshHeaders();
         } else {
             rightArea.setText(content);
             rightPath = p;
             resetUndoHistory(Side.RIGHT);
             lastSavedRight = content;
+            refreshHeaders();
         }
         recompute();
     }
 
-    void handleBothDrop(Path p1, String t1, Path p2, String t2) {
-        leftArea.setText(t1);
-        rightArea.setText(t2);
+    void handleBothDrop(Path p1, FileContentLoader.LoadedContent t1, Path p2, FileContentLoader.LoadedContent t2) {
+        leftArea.setText(t1.text());
+        rightArea.setText(t2.text());
         leftPath = p1;
         rightPath = p2;
         resetUndoHistory(Side.BOTH);
-        lastSavedLeft = t1;
-        lastSavedRight = t2;
+        lastSavedLeft = t1.text();
+        lastSavedRight = t2.text();
+        refreshHeaders();
         recompute();
     }
 
@@ -1207,6 +1277,7 @@ public class MirrorMatchApp extends JFrame {
         JOptionPane.showMessageDialog(this, s, "Error", JOptionPane.ERROR_MESSAGE);
         setStatus("Error: " + s);
     }
+
     private void applyWithCustomUndo(JTextArea area, int startOffset, int endOffset, String replacement, boolean onLeft) throws Exception {
         javax.swing.text.Document doc = area.getDocument();
         int len = Math.max(0, endOffset - startOffset);
