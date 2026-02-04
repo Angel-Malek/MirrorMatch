@@ -29,25 +29,31 @@ import java.util.List;
 
 import app.FileContentLoader;
 
-import app.FileContentLoader;
-
 import static app.DiffEngine.*;
 
 public class MirrorMatchApp extends JFrame {
 
-    private final JTextArea leftArea = createEditor();
-    private final JTextArea rightArea = createEditor();
+    private final EditorPane left = new EditorPane("Left");
+    private final EditorPane right = new EditorPane("Right");
 
-    private final Highlighter leftHL = leftArea.getHighlighter();
-    private final Highlighter rightHL = rightArea.getHighlighter();
+    private final JTextArea leftDiffView = createDiffView();
+    private final JTextArea rightDiffView = createDiffView();
+
     private final java.util.List<Object> focusLeftTags = new java.util.ArrayList<>();
     private final java.util.List<Object> focusRightTags = new java.util.ArrayList<>();
     private final Highlighter.HighlightPainter focusPainter =
             new UnderlineHatchPainter(new Color(120, 160, 255, 120));
     private final Highlighter.HighlightPainter inlinePainter =
             new DefaultHighlighter.DefaultHighlightPainter(new Color(200, 215, 255, 150));
-    private int editorFontSize = 14;
-    private String themeName = "Light";
+    private final Highlighter.HighlightPainter deletePainter =
+            new DefaultHighlighter.DefaultHighlightPainter(new Color(255, 232, 232));
+    private final Highlighter.HighlightPainter insertPainter =
+            new DefaultHighlighter.DefaultHighlightPainter(new Color(230, 245, 230));
+    private final Highlighter.HighlightPainter changeLeftPainter =
+            new DefaultHighlighter.DefaultHighlightPainter(new Color(255, 242, 217));
+    private final Highlighter.HighlightPainter changeRightPainter =
+            new DefaultHighlighter.DefaultHighlightPainter(new Color(220, 236, 255));
+    private final ThemeManager themeManager = new ThemeManager();
 
     private final JLabel status = new JLabel("Ready.");
     private final JCheckBox syncScroll = new JCheckBox("Sync scroll", true);
@@ -65,40 +71,21 @@ public class MirrorMatchApp extends JFrame {
     private final JButton undoLeft = new JButton("Undo L");
     private final JButton undoRight = new JButton("Undo R");
     private final JButton undoAny = new JButton("Undo (⌘/Ctrl+Z)");
-    private final JLabel headerLeft = createHeaderLabel("Left");
-    private final JLabel headerRight = createHeaderLabel("Right");
 
-    private List<String> leftLines = List.of("");
-    private List<String> rightLines = List.of("");
-    private Result currentDiff = DiffEngine.diffLines("", "");
-    private List<Hunk> changes = currentDiff.changeHunks();
-    private int currentIndex = -1;
-
-    Path leftPath = null;
-    Path rightPath = null;
+    private final DiffSession session = new DiffSession();
 
     private SwingWorker<DiffEngine.Result, Void> diffWorker;
     private volatile boolean suppressDocEvents = false;
     private Timer debounceTimer;
 
-    private final UndoManager undoManagerLeft = new UndoManager();
-    private final UndoManager undoManagerRight = new UndoManager();
     private boolean suppressUndoCapture = false;
     private final javax.swing.event.UndoableEditListener leftRecorder = e -> { if (!suppressUndoCapture) recordEdit(true); };
     private final javax.swing.event.UndoableEditListener rightRecorder = e -> { if (!suppressUndoCapture) recordEdit(false); };
     private final Deque<Boolean> undoStack = new ArrayDeque<>();
     private boolean collapsedMode = false;
 
-    private enum Side { LEFT, RIGHT, BOTH }
+    private final CenterDiffGutter centerGutter;
 
-    private String lastSavedLeft = "";
-    private String lastSavedRight = "";
-
-    private final CenterDiffGutter centerGutter = new CenterDiffGutter(leftArea, rightArea);
-    private final LineNumberGutter gutterLeft = new LineNumberGutter(leftArea);
-    private final LineNumberGutter gutterRight = new LineNumberGutter(rightArea);
-    private final JTextArea leftDiffView = createDiffViewer();
-    private final JTextArea rightDiffView = createDiffViewer();
     private final CardLayout centerCards = new CardLayout();
     private final JPanel centerDeck = new JPanel(centerCards);
 
@@ -117,13 +104,13 @@ public class MirrorMatchApp extends JFrame {
 
         setJMenuBar(createMenuBar());
 
-        JScrollPane leftScroll = createScroll(leftArea);
-        JScrollPane rightScroll = createScroll(rightArea);
-        leftScroll.setRowHeaderView(gutterLeft);
-        rightScroll.setRowHeaderView(gutterRight);
+        centerGutter = new CenterDiffGutter(left.area(), right.area());
+
+        JScrollPane leftScroll = left.scroll();
+        JScrollPane rightScroll = right.scroll();
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                wrapEditor(leftScroll, headerLeft, "Left"), wrapEditor(rightScroll, headerRight, "Right"));
+                left.view(), right.view());
         split.setResizeWeight(0.5);
         split.setDividerSize(48);
         attachCenterGutter(split, centerGutter);
@@ -180,8 +167,8 @@ public class MirrorMatchApp extends JFrame {
         addScrollSync(leftScroll, rightScroll);
         addGutterRepaintOnScroll(leftScroll, rightScroll);
 
-        prevBtn.addActionListener(e -> gotoDiff(currentIndex - 1));
-        nextBtn.addActionListener(e -> gotoDiff(currentIndex + 1));
+        prevBtn.addActionListener(e -> gotoDiff(session.currentIndex() - 1));
+        nextBtn.addActionListener(e -> gotoDiff(session.currentIndex() + 1));
         copyL2R.addActionListener(e -> applyCopy(true));
         copyR2L.addActionListener(e -> applyCopy(false));
         delLeft.addActionListener(e -> applyDelete(true));
@@ -208,48 +195,36 @@ public class MirrorMatchApp extends JFrame {
         FileDropHandler fileDropHandler = new FileDropHandler(this);
         leftScroll.setTransferHandler(fileDropHandler);
         leftScroll.getViewport().setTransferHandler(fileDropHandler);
-        leftArea.setTransferHandler(fileDropHandler);
+        left.area().setTransferHandler(fileDropHandler);
 
         rightScroll.setTransferHandler(fileDropHandler);
         rightScroll.getViewport().setTransferHandler(fileDropHandler);
-        rightArea.setTransferHandler(fileDropHandler);
+        right.area().setTransferHandler(fileDropHandler);
 
         getRootPane().setTransferHandler(fileDropHandler);
         getGlassPane().setVisible(false); // keep glass pane hidden to preserve text selection
         ((JComponent) getGlassPane()).setTransferHandler(null);
 
         // avoid conflict with default text drop
-        leftArea.setDropTarget(null);
-        rightArea.setDropTarget(null);
+        left.area().setDropTarget(null);
+        right.area().setDropTarget(null);
 
         pack();
         setLocationRelativeTo(null);
 
         loadSampleDefaults();
-        applyFontSize(editorFontSize);
-        applyTheme(themeName);
+        themeManager.apply(left, right, leftDiffView, rightDiffView, getContentPane());
         refreshHeaders();
 
     }
 
-    private static JTextArea createEditor() {
+    private static JTextArea createDiffView() {
         JTextArea area = new JTextArea();
         area.setTabSize(4);
         area.setLineWrap(false);
         area.setMargin(new Insets(8, 10, 8, 10));
         area.setBackground(new Color(250, 251, 254));
         area.setBorder(BorderFactory.createEmptyBorder());
-        return area;
-    }
-
-    private static JTextArea createDiffViewer() {
-        JTextArea area = new JTextArea();
-        area.setFont(new Font("IBM Plex Mono", Font.PLAIN, 13));
-        area.setEditable(false);
-        area.setOpaque(true);
-        area.setBackground(new Color(249, 249, 252));
-        area.setMargin(new Insets(8, 10, 8, 10));
-        area.setLineWrap(false);
         return area;
     }
 
@@ -286,15 +261,8 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void refreshHeaders() {
-        setHeaderInfo(headerLeft, leftPath, "Left");
-        setHeaderInfo(headerRight, rightPath, "Right");
-    }
-
-    private void setHeaderInfo(JLabel header, Path path, String fallback) {
-        String name = path != null ? path.getFileName().toString() : fallback;
-        header.setText("  " + name);
-        header.setIcon(iconForPath(path));
-        header.setToolTipText(path != null ? path.toString() : null);
+        left.refreshHeader();
+        right.refreshHeader();
     }
 
     private Icon iconForPath(Path path) {
@@ -364,12 +332,12 @@ public class MirrorMatchApp extends JFrame {
         JMenuItem saveRightAs = new JMenuItem("Save Right As…");
         JMenuItem exit = new JMenuItem("Exit");
 
-        openLeft.addActionListener(e -> openInto(leftArea, true));
-        openRight.addActionListener(e -> openInto(rightArea, false));
-        saveLeft.addActionListener(e -> saveFrom(leftArea, true, false));
-        saveRight.addActionListener(e -> saveFrom(rightArea, false, false));
-        saveLeftAs.addActionListener(e -> saveFrom(leftArea, true, true));
-        saveRightAs.addActionListener(e -> saveFrom(rightArea, false, true));
+        openLeft.addActionListener(e -> openInto(left.area(), true));
+        openRight.addActionListener(e -> openInto(right.area(), false));
+        saveLeft.addActionListener(e -> saveFrom(left.area(), true, false));
+        saveRight.addActionListener(e -> saveFrom(right.area(), false, false));
+        saveLeftAs.addActionListener(e -> saveFrom(left.area(), true, true));
+        saveRightAs.addActionListener(e -> saveFrom(right.area(), false, true));
         exit.addActionListener(e -> dispose());
 
         file.add(openLeft);
@@ -387,7 +355,14 @@ public class MirrorMatchApp extends JFrame {
         recomputeItem.addActionListener(e -> recompute());
         view.add(recomputeItem);
         JMenuItem prefsItem = new JMenuItem("Preferences…");
-        prefsItem.addActionListener(e -> openPreferences());
+        prefsItem.addActionListener(e -> {
+            PreferencesDialog.Result res = PreferencesDialog.show(this, themeManager.fontSize(), themeManager.themeName());
+            if (res != null) {
+                themeManager.setFontSize(res.fontSize());
+                themeManager.setThemeName(res.themeName());
+                themeManager.apply(left, right, leftDiffView, rightDiffView, getContentPane());
+            }
+        });
         view.addSeparator();
         view.add(prefsItem);
 
@@ -403,16 +378,11 @@ public class MirrorMatchApp extends JFrame {
             try {
                 FileContentLoader.LoadedContent payload = FileContentLoader.load(p);
                 area.setText(payload.text());
-                resetUndoHistory(left ? Side.LEFT : Side.RIGHT);
-                if (left) {
-                    leftPath = p;
-                    setStatus("Opened LEFT: " + p);
-                    lastSavedLeft = payload.text();
-                } else {
-                    rightPath = p;
-                    setStatus("Opened RIGHT: " + p);
-                    lastSavedRight = payload.text();
-                }
+                resetUndoHistory(java.util.EnumSet.of(left ? EditorSide.LEFT : EditorSide.RIGHT));
+                EditorPane pane = left ? this.left : this.right;
+                pane.setPath(p);
+                pane.setLastSaved(payload.text());
+                setStatus("Opened " + (left ? "LEFT" : "RIGHT") + ": " + p);
                 refreshHeaders();
                 recompute();
             } catch (IOException ex) {
@@ -423,25 +393,17 @@ public class MirrorMatchApp extends JFrame {
 
     private void saveFrom(JTextArea area, boolean left, boolean forceAs) {
         try {
-            Path target = left ? leftPath : rightPath;
+            EditorPane pane = left ? this.left : this.right;
+            Path target = pane.path();
             if (forceAs || target == null) {
                 JFileChooser fc = new JFileChooser();
                 if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
                 target = fc.getSelectedFile().toPath();
-                if (left) {
-                    leftPath = target;
-                } else {
-                    rightPath = target;
-                }
+                pane.setPath(target);
             }
             Files.writeString(target, area.getText());
-            if (left) {
-                lastSavedLeft = area.getText();
-                refreshHeaders();
-            } else {
-                lastSavedRight = area.getText();
-                refreshHeaders();
-            }
+            pane.setLastSaved(area.getText());
+            refreshHeaders();
             setStatus("Saved " + (left ? "LEFT" : "RIGHT") + " → " + target);
         } catch (IOException ex) {
             error("Save failed: " + ex.getMessage());
@@ -455,84 +417,115 @@ public class MirrorMatchApp extends JFrame {
     private void toggleDiffOnlyView() {
         boolean on = diffOnlyToggle.isSelected();
         if (on) {
-            refreshDiffOnlyView();
-            centerCards.show(centerDeck, "diff");
-            centerGutter.setVisible(false);
-            setStatus("Showing differences only.");
+            enterCollapsedMode();
+            setStatus("Diff only: editing differences.");
         } else {
-            centerCards.show(centerDeck, "main");
-            centerGutter.setVisible(true);
+            exitCollapsedMode();
             setStatus("Back to full view.");
         }
     }
 
-    private void addHighlight(Highlighter.HighlightPainter painter, JTextArea area,
-                              int lineStart, int lineEnd) {
-        try {
-            javax.swing.text.Element root = area.getDocument().getDefaultRootElement();
-            int lc = root.getElementCount();
-            if (lc == 0) return;
-            int a = Math.min(Math.max(0, lineStart), lc - 1);
-            int bLine = Math.max(lineStart, lineEnd) - 1;
-            int b = Math.min(Math.max(0, bLine), lc - 1);
-            int start = root.getElement(a).getStartOffset();
-            int end = root.getElement(b).getEndOffset();
-            area.getHighlighter().addHighlight(start, end, painter);
-        } catch (BadLocationException ignored) {}
+    private List<String> fullLeftBackup = List.of();
+    private List<String> fullRightBackup = List.of();
+    private List<Hunk> collapsedHunks = List.of();
+
+    private void enterCollapsedMode() {
+        if (collapsedMode) return;
+        if (session.changes().isEmpty()) {
+            setStatus("No differences to collapse.");
+            diffOnlyToggle.setSelected(false);
+            return;
+        }
+        fullLeftBackup = List.of(left.area().getText().split("\n", -1));
+        fullRightBackup = List.of(right.area().getText().split("\n", -1));
+        collapsedHunks = new ArrayList<>(session.changes());
+
+        collapseIntoEditors(true);
+        collapseIntoEditors(false);
+
+        collapsedMode = true;
+        centerGutter.setVisible(true);
+        session.updateTexts(left.area().getText(), right.area().getText());
+        session.updateDiff(session.currentDiff()); // refresh highlights on collapsed content
+        refreshHighlights();
+        centerGutter.rebuildMarkers(session.changes());
     }
 
-    private void refreshHighlights() {
-        leftHL.removeAllHighlights();
-        rightHL.removeAllHighlights();
-        focusLeftTags.clear();
-        focusRightTags.clear();
+    private void exitCollapsedMode() {
+        if (!collapsedMode) return;
+        collapsedMode = false;
+        suppressDocEvents = true;
+        try {
+            left.area().setText(String.join("\n", fullLeftBackup));
+            right.area().setText(String.join("\n", fullRightBackup));
+        } finally {
+            suppressDocEvents = false;
+        }
+        DiffEngine.Result diff = DiffEngine.diffLines(left.area().getText(), right.area().getText());
+        session.updateDiff(diff);
+        session.updateTexts(left.area().getText(), right.area().getText());
+        refreshHighlights();
+        centerGutter.rebuildMarkers(session.currentDiff().hunks);
+    }
 
-        Highlighter.HighlightPainter delPainter =
-                new DefaultHighlighter.DefaultHighlightPainter(new Color(255, 220, 220));
-        Highlighter.HighlightPainter insPainter =
-                new DefaultHighlighter.DefaultHighlightPainter(new Color(220, 255, 220));
-        Highlighter.HighlightPainter changePainter =
-                new DefaultHighlighter.DefaultHighlightPainter(new Color(255, 245, 200));
+    private void collapseIntoEditors(boolean leftSide) {
+        JTextArea area = leftSide ? left.area() : right.area();
+        List<String> base = leftSide ? fullLeftBackup : fullRightBackup;
+        StringBuilder sb = new StringBuilder();
+        for (Hunk h : collapsedHunks) {
+            if (h.type() == HunkType.EQUAL) continue;
+            int start = leftSide ? h.leftStart() : h.rightStart();
+            int end = leftSide ? h.leftEnd() : h.rightEnd();
+            for (int i = start; i < end; i++) {
+                sb.append(i < base.size() ? base.get(i) : "").append("\n");
+            }
+        }
+        suppressDocEvents = true;
+        try {
+            area.setText(sb.toString());
+        } finally {
+            suppressDocEvents = false;
+        }
+    }
+
+
+
+    private void refreshHighlights() {
+        clearFocusHighlights();
+        left.clearHighlights();
+        right.clearHighlights();
 
         int i = 0;
-        int n = currentDiff.hunks.size();
+        int n = session.currentDiff().hunks.size();
         while (i < n) {
-            Hunk h = currentDiff.hunks.get(i);
-            HunkType t = h.type();
-            if (t == HunkType.DELETE) {
-                addHighlight(delPainter, leftArea, h.leftStart(), h.leftEnd());
-            } else if (t == HunkType.INSERT) {
-                addHighlight(insPainter, rightArea, h.rightStart(), h.rightEnd());
-            } else if (t == HunkType.CHANGE) {
-                addHighlight(changePainter, leftArea, h.leftStart(), h.leftEnd());
-                addHighlight(changePainter, rightArea, h.rightStart(), h.rightEnd());
+            Hunk h = session.currentDiff().hunks.get(i);
+            if (h.type() == HunkType.DELETE) {
+                left.highlightLines(deletePainter, h.leftStart(), h.leftEnd());
+            } else if (h.type() == HunkType.INSERT) {
+                right.highlightLines(insertPainter, h.rightStart(), h.rightEnd());
+            } else if (h.type() == HunkType.CHANGE) {
+                left.highlightLines(changeLeftPainter, h.leftStart(), h.leftEnd());
+                right.highlightLines(changeRightPainter, h.rightStart(), h.rightEnd());
             }
             i = i + 1;
-        }
-        if (!changes.isEmpty() && currentIndex >= 0 && currentIndex < changes.size()) {
-            highlightCurrentHunk(changes.get(currentIndex));
         }
     }
 
     private void addInlineHighlights() {
-        int n = currentDiff.hunks.size();
         int i = 0;
+        int n = session.currentDiff().hunks.size();
         while (i < n) {
-            Hunk h = currentDiff.hunks.get(i);
+            Hunk h = session.currentDiff().hunks.get(i);
             if (h.type() == HunkType.CHANGE) {
-                int leftSpan = h.leftEnd() - h.leftStart();
-                int rightSpan = h.rightEnd() - h.rightStart();
-                int pairs = Math.min(leftSpan, rightSpan);
+                int pairCount = Math.min(h.leftEnd() - h.leftStart(), h.rightEnd() - h.rightStart());
                 int j = 0;
-                while (j < pairs) {
-                    int li = h.leftStart() + j;
-                    int ri = h.rightStart() + j;
-                    String l = safeLine(leftLines, li);
-                    String r = safeLine(rightLines, ri);
-                    InlineSpan span = computeInlineSpan(l, r);
+                while (j < pairCount) {
+                    String l = session.safeLine(true, h.leftStart() + j);
+                    String r = session.safeLine(false, h.rightStart() + j);
+                    DiffSession.InlineSpan span = session.computeInlineSpan(l, r);
                     if (span != null) {
-                        highlightWord(leftArea, li, span.start, span.endLeft, inlinePainter);
-                        highlightWord(rightArea, ri, span.start, span.endRight, inlinePainter);
+                        highlightWord(left.area(), h.leftStart() + j, span.start(), span.endLeft(), inlinePainter);
+                        highlightWord(right.area(), h.rightStart() + j, span.start(), span.endRight(), inlinePainter);
                     }
                     j = j + 1;
                 }
@@ -541,31 +534,10 @@ public class MirrorMatchApp extends JFrame {
         }
     }
 
-    private record InlineSpan(int start, int endLeft, int endRight) {}
-
-    private InlineSpan computeInlineSpan(String l, String r) {
-        int lenL = l.length();
-        int lenR = r.length();
-        int min = Math.min(lenL, lenR);
-        int prefix = 0;
-        while (prefix < min && l.charAt(prefix) == r.charAt(prefix)) {
-            prefix = prefix + 1;
-        }
-        int suffix = 0;
-        while (suffix < min - prefix && l.charAt(lenL - 1 - suffix) == r.charAt(lenR - 1 - suffix)) {
-            suffix = suffix + 1;
-        }
-        int start = prefix;
-        int endL = lenL - suffix;
-        int endR = lenR - suffix;
-        if (start >= endL && start >= endR) return null;
-        return new InlineSpan(start, endL, endR);
-    }
-
     private void highlightWord(JTextArea area, int lineIndex, int colStart, int colEnd, Highlighter.HighlightPainter painter) {
         try {
             int lineOffset = area.getLineStartOffset(Math.max(0, Math.min(lineIndex, area.getLineCount() - 1)));
-            int lineLen = Math.max(0, safeLine(area == leftArea ? leftLines : rightLines, lineIndex).length());
+            int lineLen = Math.max(0, session.safeLine(area == left.area(), lineIndex).length());
             int s = lineOffset + Math.max(0, Math.min(colStart, lineLen));
             int e = lineOffset + Math.max(0, Math.min(colEnd, lineLen));
             if (e > s) {
@@ -576,85 +548,39 @@ public class MirrorMatchApp extends JFrame {
 
     private void refreshDiffOnlyView() {
         if (!diffOnlyToggle.isSelected() && leftDiffView.getText().isEmpty()) return;
-        String leftText = buildDiffOnlyText(leftLines, true);
-        String rightText = buildDiffOnlyText(rightLines, false);
+        String leftText = session.buildDiffOnlyText(true);
+        String rightText = session.buildDiffOnlyText(false);
         leftDiffView.setText(leftText);
         rightDiffView.setText(rightText);
         leftDiffView.setCaretPosition(0);
         rightDiffView.setCaretPosition(0);
     }
-
-    private String buildDiffOnlyText(List<String> sourceLines, boolean leftSide) {
-        StringBuilder sb = new StringBuilder();
-        int lastSeen = 0;
-        int i = 0;
-        int n = currentDiff.hunks.size();
-        while (i < n) {
-            Hunk h = currentDiff.hunks.get(i);
-            int start = leftSide ? h.leftStart() : h.rightStart();
-            int end = leftSide ? h.leftEnd() : h.rightEnd();
-
-            if (h.type() == HunkType.EQUAL) {
-                lastSeen = end;
-                i = i + 1;
-                continue;
-            }
-
-            if (start > lastSeen) {
-                sb.append("… ").append(start - lastSeen).append(" unchanged …\n");
-            }
-
-            int line = start;
-            while (line < end) {
-                sb.append(String.format("%5d │ %s%n", line + 1, safeLine(sourceLines, line)));
-                line = line + 1;
-            }
-
-            if (start == end) {
-                int count = Math.abs((leftSide ? h.rightEnd() - h.rightStart() : h.leftEnd() - h.leftStart()));
-                String note = leftSide ? "only on right" : "only on left";
-                sb.append(String.format("%5d │ [%d line(s) %s]%n", start + 1, count, note));
-            }
-            lastSeen = end;
-            i = i + 1;
-        }
-        if (sb.length() == 0) {
-            sb.append("No differences.");
-        }
-        return sb.toString();
-    }
-
-    private String safeLine(List<String> lines, int idx) {
-        if (idx < 0 || idx >= lines.size()) return "";
-        return lines.get(idx);
-    }
-
     private void highlightCurrentHunk(Hunk h) {
         if (h == null) return;
         try {
-            javax.swing.text.Element rootL = leftArea.getDocument().getDefaultRootElement();
-            javax.swing.text.Element rootR = rightArea.getDocument().getDefaultRootElement();
+            javax.swing.text.Element rootL = left.area().getDocument().getDefaultRootElement();
+            javax.swing.text.Element rootR = right.area().getDocument().getDefaultRootElement();
             clearFocusHighlights();
 
             if (h.type() == HunkType.DELETE || h.type() == HunkType.CHANGE) {
-                addFocusLines(leftHL, focusLeftTags, rootL, leftArea, h.leftStart(), h.leftEnd());
-                gutterLeft.setFocusLines(java.util.List.of(clampLine(h.leftStart(), rootL)));
+                addFocusLines(left.highlighter(), focusLeftTags, rootL, left.area(), h.leftStart(), h.leftEnd());
+                left.gutter().setFocusLines(java.util.List.of(clampLine(h.leftStart(), rootL)));
             } else {
-                gutterLeft.setFocusLines(java.util.List.of());
+                left.gutter().setFocusLines(java.util.List.of());
             }
             if (h.type() == HunkType.INSERT || h.type() == HunkType.CHANGE) {
-                addFocusLines(rightHL, focusRightTags, rootR, rightArea, h.rightStart(), h.rightEnd());
-                gutterRight.setFocusLines(java.util.List.of(clampLine(h.rightStart(), rootR)));
+                addFocusLines(right.highlighter(), focusRightTags, rootR, right.area(), h.rightStart(), h.rightEnd());
+                right.gutter().setFocusLines(java.util.List.of(clampLine(h.rightStart(), rootR)));
             } else {
-                gutterRight.setFocusLines(java.util.List.of());
+                right.gutter().setFocusLines(java.util.List.of());
             }
             if (h.type() == HunkType.CHANGE) {
-                gutterLeft.setFocusLines(java.util.List.of(clampLine(h.leftStart(), rootL)));
-                gutterRight.setFocusLines(java.util.List.of(clampLine(h.rightStart(), rootR)));
+                left.gutter().setFocusLines(java.util.List.of(clampLine(h.leftStart(), rootL)));
+                right.gutter().setFocusLines(java.util.List.of(clampLine(h.rightStart(), rootR)));
             }
         } catch (Exception ignored) {}
-        leftArea.repaint();
-        rightArea.repaint();
+        left.area().repaint();
+        right.area().repaint();
         centerGutter.repaint();
     }
 
@@ -693,8 +619,8 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void clearFocusHighlights() {
-        removeTags(leftHL, focusLeftTags);
-        removeTags(rightHL, focusRightTags);
+        removeTags(left.highlighter(), focusLeftTags);
+        removeTags(right.highlighter(), focusRightTags);
         focusLeftTags.clear();
         focusRightTags.clear();
     }
@@ -708,92 +634,6 @@ public class MirrorMatchApp extends JFrame {
             } catch (Exception ignored) {}
             i = i + 1;
         }
-    }
-
-    private void openPreferences() {
-        JDialog dialog = new JDialog(this, "Preferences", true);
-        dialog.setLayout(new GridBagLayout());
-        GridBagConstraints gc = new GridBagConstraints();
-        gc.insets = new Insets(6, 8, 6, 8);
-        gc.anchor = GridBagConstraints.WEST;
-
-        JLabel fontLbl = new JLabel("Editor font size:");
-        JSpinner fontSpinner = new JSpinner(new SpinnerNumberModel(editorFontSize, 10, 32, 1));
-
-        JLabel themeLbl = new JLabel("Theme:");
-        JComboBox<String> themeBox = new JComboBox<>(new String[]{"Light", "Soft Dark"});
-        themeBox.setSelectedItem(themeName);
-
-        gc.gridx = 0; gc.gridy = 0;
-        dialog.add(fontLbl, gc);
-        gc.gridx = 1;
-        dialog.add(fontSpinner, gc);
-
-        gc.gridx = 0; gc.gridy = 1;
-        dialog.add(themeLbl, gc);
-        gc.gridx = 1;
-        dialog.add(themeBox, gc);
-
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        JButton ok = new JButton("OK");
-        JButton cancel = new JButton("Cancel");
-        buttons.add(cancel);
-        buttons.add(ok);
-        gc.gridx = 0; gc.gridy = 2; gc.gridwidth = 2;
-        gc.anchor = GridBagConstraints.EAST;
-        dialog.add(buttons, gc);
-
-        ok.addActionListener(e -> {
-            editorFontSize = (int) fontSpinner.getValue();
-            themeName = (String) themeBox.getSelectedItem();
-            applyFontSize(editorFontSize);
-            applyTheme(themeName);
-            dialog.dispose();
-        });
-        cancel.addActionListener(e -> dialog.dispose());
-
-        dialog.pack();
-        dialog.setLocationRelativeTo(this);
-        dialog.setVisible(true);
-    }
-
-    private void applyFontSize(int size) {
-        Font main = new Font(Font.MONOSPACED, Font.PLAIN, size);
-        leftArea.setFont(main);
-        rightArea.setFont(main);
-        gutterLeft.setFont(main);
-        gutterRight.setFont(main);
-        Font diffFont = new Font("IBM Plex Mono", Font.PLAIN, Math.max(10, size - 1));
-        leftDiffView.setFont(diffFont);
-        rightDiffView.setFont(diffFont);
-    }
-
-    private void applyTheme(String theme) {
-        boolean dark = "Soft Dark".equalsIgnoreCase(theme);
-        Color bgEditor = dark ? new Color(28, 32, 38) : new Color(250, 251, 254);
-        Color fgEditor = dark ? new Color(230, 232, 236) : Color.BLACK;
-        Color gutterBg = dark ? new Color(38, 43, 50) : new Color(245, 245, 245);
-        Color gutterFg = dark ? new Color(190, 195, 205) : new Color(120, 120, 120);
-        Color panelBg = dark ? new Color(32, 36, 44) : new Color(245, 247, 252);
-
-        applyAreaTheme(leftArea, bgEditor, fgEditor);
-        applyAreaTheme(rightArea, bgEditor, fgEditor);
-        applyAreaTheme(leftDiffView, bgEditor, fgEditor);
-        applyAreaTheme(rightDiffView, bgEditor, fgEditor);
-
-        gutterLeft.setBackground(gutterBg);
-        gutterLeft.setForeground(gutterFg);
-        gutterRight.setBackground(gutterBg);
-        gutterRight.setForeground(gutterFg);
-
-        getContentPane().setBackground(panelBg);
-    }
-
-    private void applyAreaTheme(JTextArea area, Color bg, Color fg) {
-        area.setBackground(bg);
-        area.setForeground(fg);
-        area.getCaret().setVisible(true);
-        area.getCaret().setBlinkRate(500);
     }
 
     /** Painter that draws a semi-transparent hatch to sit atop existing diff colors. */
@@ -830,29 +670,31 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void gotoDiff(int newIndex) {
+        java.util.List<Hunk> changes = session.changes();
         if (changes.isEmpty()) return;
         int maxIndex = changes.size() - 1;
-        currentIndex = Math.max(0, Math.min(newIndex, maxIndex));
-        Hunk h = changes.get(currentIndex);
+        session.setCurrentIndex(Math.max(0, Math.min(newIndex, maxIndex)));
+        Hunk h = changes.get(session.currentIndex());
         try {
-            int lStart = leftArea.getLineStartOffset(
-                    Math.min(h.leftStart(), Math.max(0, leftArea.getLineCount() - 1)));
-            int rStart = rightArea.getLineStartOffset(
-                    Math.min(h.rightStart(), Math.max(0, rightArea.getLineCount() - 1)));
-            leftArea.setCaretPosition(lStart);
-            rightArea.setCaretPosition(rStart);
-            leftArea.scrollRectToVisible(leftArea.modelToView2D(lStart).getBounds());
-            rightArea.scrollRectToVisible(rightArea.modelToView2D(rStart).getBounds());
+            int lStart = left.area().getLineStartOffset(
+                    Math.min(h.leftStart(), Math.max(0, left.area().getLineCount() - 1)));
+            int rStart = right.area().getLineStartOffset(
+                    Math.min(h.rightStart(), Math.max(0, right.area().getLineCount() - 1)));
+            left.area().setCaretPosition(lStart);
+            right.area().setCaretPosition(rStart);
+            left.area().scrollRectToVisible(left.area().modelToView2D(lStart).getBounds());
+            right.area().scrollRectToVisible(right.area().modelToView2D(rStart).getBounds());
         } catch (BadLocationException ignored) {}
         highlightCurrentHunk(h);
         updateNavButtons();
-        setStatus("Diff " + (currentIndex + 1) + " / " + changes.size());
+        setStatus("Diff " + (session.currentIndex() + 1) + " / " + changes.size());
     }
 
     private void updateNavButtons() {
+        java.util.List<Hunk> changes = session.changes();
         boolean has = !changes.isEmpty();
-        prevBtn.setEnabled(has && currentIndex > 0);
-        nextBtn.setEnabled(has && currentIndex < changes.size() - 1);
+        prevBtn.setEnabled(has && session.currentIndex() > 0);
+        nextBtn.setEnabled(has && session.currentIndex() < changes.size() - 1);
         copyL2R.setEnabled(has);
         copyR2L.setEnabled(has);
         delLeft.setEnabled(has);
@@ -860,35 +702,38 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void applyCopy(boolean leftToRight) {
-        if (currentIndex < 0 || currentIndex >= changes.size()) return;
-        Hunk h = changes.get(currentIndex);
+        java.util.List<Hunk> changes = session.changes();
+        if (session.currentIndex() < 0 || session.currentIndex() >= changes.size()) return;
+        Hunk h = changes.get(session.currentIndex());
         if (leftToRight) {
-            List<String> src = leftLines.subList(h.leftStart(), h.leftEnd());
-            replaceLines(rightArea, h.rightStart(), h.rightEnd(), src);
+            List<String> src = session.leftLines().subList(h.leftStart(), h.leftEnd());
+            replaceLines(right.area(), h.rightStart(), h.rightEnd(), src);
         } else {
-            List<String> src = rightLines.subList(h.rightStart(), h.rightEnd());
-            replaceLines(leftArea, h.leftStart(), h.leftEnd(), src);
+            List<String> src = session.rightLines().subList(h.rightStart(), h.rightEnd());
+            replaceLines(left.area(), h.leftStart(), h.leftEnd(), src);
         }
         recompute();
     }
 
     private void applyDelete(boolean onLeft) {
-        if (currentIndex < 0 || currentIndex >= changes.size()) return;
-        Hunk h = changes.get(currentIndex);
+        java.util.List<Hunk> changes = session.changes();
+        if (session.currentIndex() < 0 || session.currentIndex() >= changes.size()) return;
+        Hunk h = changes.get(session.currentIndex());
         if (onLeft) {
-            replaceLines(leftArea, h.leftStart(), h.leftEnd(), List.of());
+            replaceLines(left.area(), h.leftStart(), h.leftEnd(), List.of());
         } else {
-            replaceLines(rightArea, h.rightStart(), h.rightEnd(), List.of());
+            replaceLines(right.area(), h.rightStart(), h.rightEnd(), List.of());
         }
         recompute();
     }
 
     private void handleArrowCopy(boolean leftToRight, int lineIndex, boolean bulk) {
+        java.util.List<Hunk> changes = session.changes();
         Hunk h = findHunkForLine(leftToRight, lineIndex);
         if (h == null) return;
         int idx = changes.indexOf(h);
         if (idx >= 0) {
-            currentIndex = idx;
+            session.setCurrentIndex(idx);
             updateNavButtons();
         }
         if (bulk) {
@@ -900,26 +745,12 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private Hunk findHunkForLine(boolean usingLeftSide, int lineIndex) {
-        int n = currentDiff.hunks.size();
-        int i = 0;
-        while (i < n) {
-            Hunk h = currentDiff.hunks.get(i);
-            if (h.type() != HunkType.EQUAL) {
-                if (usingLeftSide && lineIndex >= h.leftStart() && lineIndex < h.leftEnd()) {
-                    return h;
-                }
-                if (!usingLeftSide && lineIndex >= h.rightStart() && lineIndex < h.rightEnd()) {
-                    return h;
-                }
-            }
-            i = i + 1;
-        }
-        return null;
+        return session.findHunkForLine(usingLeftSide, lineIndex);
     }
 
     private void copySingleLine(boolean leftToRight, Hunk h, int lineIndex) {
-        List<String> srcLines = leftToRight ? leftLines : rightLines;
-        JTextArea target = leftToRight ? rightArea : leftArea;
+        List<String> srcLines = leftToRight ? session.leftLines() : session.rightLines();
+        JTextArea target = leftToRight ? right.area() : left.area();
 
         int srcStart = leftToRight ? h.leftStart() : h.rightStart();
         int dstStart = leftToRight ? h.rightStart() : h.leftStart();
@@ -934,7 +765,7 @@ public class MirrorMatchApp extends JFrame {
     private void replaceLines(JTextArea area, int startLine, int endLine, List<String> with) {
         try {
             suppressDocEvents = true;
-            boolean onLeft = area == leftArea;
+            boolean onLeft = area == left.area();
             int lineCount = area.getLineCount();
             int startOffset;
             if (lineCount <= 0) {
@@ -973,20 +804,20 @@ public class MirrorMatchApp extends JFrame {
                 if (!suppressDocEvents) delayedRecompute();
             }
         };
-        leftArea.getDocument().addDocumentListener(dl);
-        rightArea.getDocument().addDocumentListener(dl);
+        left.area().getDocument().addDocumentListener(dl);
+        right.area().getDocument().addDocumentListener(dl);
 
-        leftArea.getDocument().addUndoableEditListener(undoManagerLeft);
-        rightArea.getDocument().addUndoableEditListener(undoManagerRight);
-        leftArea.getDocument().addUndoableEditListener(leftRecorder);
-        rightArea.getDocument().addUndoableEditListener(rightRecorder);
+        left.area().getDocument().addUndoableEditListener(left.undoManager());
+        right.area().getDocument().addUndoableEditListener(right.undoManager());
+        left.area().getDocument().addUndoableEditListener(leftRecorder);
+        right.area().getDocument().addUndoableEditListener(rightRecorder);
 
-        installUndoShortcut(leftArea);
-        installUndoShortcut(rightArea);
+        installUndoShortcut(left.area());
+        installUndoShortcut(right.area());
         installUndoShortcut(leftDiffView);
         installUndoShortcut(rightDiffView);
-        installSaveShortcut(leftArea, true);
-        installSaveShortcut(rightArea, false);
+        installSaveShortcut(left.area(), true);
+        installSaveShortcut(right.area(), false);
     }
 
     private void delayedRecompute() {
@@ -1048,7 +879,7 @@ public class MirrorMatchApp extends JFrame {
         c.getInputMap(JComponent.WHEN_FOCUSED).put(saveStroke, "save-side");
         c.getActionMap().put("save-side", new AbstractAction() {
             @Override public void actionPerformed(ActionEvent e) {
-                saveFrom(forLeft ? leftArea : rightArea, forLeft, false);
+                saveFrom(forLeft ? left.area() : right.area(), forLeft, false);
             }
         });
     }
@@ -1060,13 +891,13 @@ public class MirrorMatchApp extends JFrame {
     private void autoSaveIfNeeded() {
         if (!autoSaveToggle.isSelected()) return;
         try {
-            if (leftPath != null && !leftArea.getText().equals(lastSavedLeft)) {
-                Files.writeString(leftPath, leftArea.getText());
-                lastSavedLeft = leftArea.getText();
+            if (left.path() != null && !left.area().getText().equals(left.lastSaved())) {
+                Files.writeString(left.path(), left.area().getText());
+                left.setLastSaved(left.area().getText());
             }
-            if (rightPath != null && !rightArea.getText().equals(lastSavedRight)) {
-                Files.writeString(rightPath, rightArea.getText());
-                lastSavedRight = rightArea.getText();
+            if (right.path() != null && !right.area().getText().equals(right.lastSaved())) {
+                Files.writeString(right.path(), right.area().getText());
+                right.setLastSaved(right.area().getText());
             }
         } catch (IOException ex) {
             setStatus("Auto-save failed: " + ex.getMessage());
@@ -1089,13 +920,13 @@ public class MirrorMatchApp extends JFrame {
         return false;
     }
 
-    private void resetUndoHistory(Side side) {
-        if (side == Side.LEFT || side == Side.BOTH) {
-            undoManagerLeft.discardAllEdits();
+    private void resetUndoHistory(java.util.EnumSet<EditorSide> sides) {
+        if (sides.contains(EditorSide.LEFT)) {
+            left.undoManager().discardAllEdits();
             removeAllForSide(true);
         }
-        if (side == Side.RIGHT || side == Side.BOTH) {
-            undoManagerRight.discardAllEdits();
+        if (sides.contains(EditorSide.RIGHT)) {
+            right.undoManager().discardAllEdits();
             removeAllForSide(false);
         }
     }
@@ -1111,8 +942,8 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void startDiffInBackground() {
-        final String leftText = leftArea.getText();
-        final String rightText = rightArea.getText();
+        final String leftText = left.area().getText();
+        final String rightText = right.area().getText();
         final boolean ignoreWS = ignoreWsToggle.isSelected();
 
         if (leftText.length() > 2000000 || rightText.length() > 2000000) {
@@ -1135,26 +966,27 @@ public class MirrorMatchApp extends JFrame {
             @Override protected void done() {
                 if (isCancelled()) return;
                 try {
-                    currentDiff = get();
-                    leftLines = List.of(leftText.split("\n", -1));
-                    rightLines = List.of(rightText.split("\n", -1));
-                    changes = currentDiff.changeHunks();
+                    DiffEngine.Result diff = get();
+                    session.updateTexts(leftText, rightText);
+                    session.updateDiff(diff);
+                    java.util.List<Hunk> changes = session.changes();
                     if (changes.isEmpty()) {
-                        currentIndex = -1;
+                        session.setCurrentIndex(-1);
                     } else {
-                        if (currentIndex < 0 || currentIndex >= changes.size()) {
-                            currentIndex = 0;
+                        int idx = session.currentIndex();
+                        if (idx < 0 || idx >= changes.size()) {
+                            session.setCurrentIndex(0);
                         }
                     }
                     refreshHighlights();
                     addInlineHighlights();
-                    if (currentIndex >= 0) {
-                        gotoDiff(currentIndex);
+                    if (session.currentIndex() >= 0) {
+                        gotoDiff(session.currentIndex());
                     } else {
                         updateNavButtons();
                         setStatus("No differences.");
                     }
-                    centerGutter.rebuildMarkers(currentDiff.hunks);
+                    centerGutter.rebuildMarkers(session.currentDiff().hunks);
                     refreshDiffOnlyView();
                     autoSaveIfNeeded();
                 } catch (Exception ignored) {}
@@ -1164,7 +996,7 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private void undoSide(boolean leftSide) {
-        UndoManager target = leftSide ? undoManagerLeft : undoManagerRight;
+        UndoManager target = leftSide ? left.undoManager() : right.undoManager();
         if (tryUndo(target)) {
             removeLatestForSide(leftSide);
             setStatus("Undo " + (leftSide ? "LEFT" : "RIGHT"));
@@ -1174,17 +1006,17 @@ public class MirrorMatchApp extends JFrame {
     private void undoLastAnySide() {
         Boolean latest = peekLatestEdit();
         if (latest == null) {
-            if (undoManagerLeft.canUndo()) {
-                tryUndo(undoManagerLeft);
+            if (left.undoManager().canUndo()) {
+                tryUndo(left.undoManager());
                 setStatus("Undo LEFT");
-            } else if (undoManagerRight.canUndo()) {
-                tryUndo(undoManagerRight);
+            } else if (right.undoManager().canUndo()) {
+                tryUndo(right.undoManager());
                 setStatus("Undo RIGHT");
             }
             return;
         }
         boolean useLeft = latest;
-        UndoManager target = useLeft ? undoManagerLeft : undoManagerRight;
+        UndoManager target = useLeft ? left.undoManager() : right.undoManager();
         if (tryUndo(target)) {
             undoStack.pollLast();
             setStatus("Undo " + (useLeft ? "LEFT" : "RIGHT"));
@@ -1202,13 +1034,13 @@ public class MirrorMatchApp extends JFrame {
             try {
                 String lt = Files.readString(lp);
                 String rt = Files.readString(rp);
-                leftArea.setText(lt);
-                rightArea.setText(rt);
-                leftPath = lp;
-                rightPath = rp;
-                lastSavedLeft = lt;
-                lastSavedRight = rt;
-                resetUndoHistory(Side.BOTH);
+                left.area().setText(lt);
+                right.area().setText(rt);
+                left.setPath(lp);
+                right.setPath(rp);
+                left.setLastSaved(lt);
+                right.setLastSaved(rt);
+                resetUndoHistory(java.util.EnumSet.of(EditorSide.LEFT, EditorSide.RIGHT));
                 refreshHeaders();
                 recompute();
                 setStatus("Loaded sample-left.txt and sample-right.txt");
@@ -1228,41 +1060,41 @@ public class MirrorMatchApp extends JFrame {
 
     // === APIs used by FileDropHandler ===
 
-    JTextArea getLeftArea() { return leftArea; }
-    JTextArea getRightArea() { return rightArea; }
+    JTextArea getLeftArea() { return left.area(); }
+    JTextArea getRightArea() { return right.area(); }
 
     void handleSingleDrop(boolean leftSide, Path p, FileContentLoader.LoadedContent payload) {
         String content = payload.text();
         if (leftSide) {
-            leftArea.setText(content);
-            leftPath = p;
-            resetUndoHistory(Side.LEFT);
-            lastSavedLeft = content;
+            left.area().setText(content);
+            left.setPath(p);
+            resetUndoHistory(java.util.EnumSet.of(EditorSide.LEFT));
+            left.setLastSaved(content);
             refreshHeaders();
         } else {
-            rightArea.setText(content);
-            rightPath = p;
-            resetUndoHistory(Side.RIGHT);
-            lastSavedRight = content;
+            right.area().setText(content);
+            right.setPath(p);
+            resetUndoHistory(java.util.EnumSet.of(EditorSide.RIGHT));
+            right.setLastSaved(content);
             refreshHeaders();
         }
         recompute();
     }
 
     void handleBothDrop(Path p1, FileContentLoader.LoadedContent t1, Path p2, FileContentLoader.LoadedContent t2) {
-        leftArea.setText(t1.text());
-        rightArea.setText(t2.text());
-        leftPath = p1;
-        rightPath = p2;
-        resetUndoHistory(Side.BOTH);
-        lastSavedLeft = t1.text();
-        lastSavedRight = t2.text();
+        left.area().setText(t1.text());
+        right.area().setText(t2.text());
+        left.setPath(p1);
+        right.setPath(p2);
+        resetUndoHistory(java.util.EnumSet.of(EditorSide.LEFT, EditorSide.RIGHT));
+        left.setLastSaved(t1.text());
+        right.setLastSaved(t2.text());
         refreshHeaders();
         recompute();
     }
 
     boolean isLeftEmpty() {
-        return leftArea.getText().isEmpty();
+        return left.isEmpty();
     }
 
     void handleDropError(String msg) {
@@ -1287,10 +1119,10 @@ public class MirrorMatchApp extends JFrame {
         suppressUndoCapture = true;
         try {
             if (onLeft) {
-                doc.removeUndoableEditListener(undoManagerLeft);
+                doc.removeUndoableEditListener(left.undoManager());
                 doc.removeUndoableEditListener(leftRecorder);
             } else {
-                doc.removeUndoableEditListener(undoManagerRight);
+                doc.removeUndoableEditListener(right.undoManager());
                 doc.removeUndoableEditListener(rightRecorder);
             }
 
@@ -1313,10 +1145,10 @@ public class MirrorMatchApp extends JFrame {
             undoStack.addLast(onLeft);
         } finally {
             if (onLeft) {
-                doc.addUndoableEditListener(undoManagerLeft);
+                doc.addUndoableEditListener(left.undoManager());
                 doc.addUndoableEditListener(leftRecorder);
             } else {
-                doc.addUndoableEditListener(undoManagerRight);
+                doc.addUndoableEditListener(right.undoManager());
                 doc.addUndoableEditListener(rightRecorder);
             }
             suppressUndoCapture = false;
@@ -1324,7 +1156,7 @@ public class MirrorMatchApp extends JFrame {
     }
 
     private UndoManager getUndoManager(boolean leftSide) {
-        return leftSide ? undoManagerLeft : undoManagerRight;
+        return leftSide ? left.undoManager() : right.undoManager();
     }
 
     private static class ReplaceEdit extends javax.swing.undo.AbstractUndoableEdit {
