@@ -51,8 +51,11 @@ public class DiffEngine {
     }
 
     public static Result diffLinesNormalized(String left, String right, java.util.function.Function<String, String> normalizer) {
-        List<String> L = splitFast(left);
-        List<String> R = splitFast(right);
+        List<String> Lorig = splitFast(left);
+        List<String> Rorig = splitFast(right);
+
+        List<String> L = Lorig;
+        List<String> R = Rorig;
 
         if (normalizer != null) {
             L = normalizeList(L, normalizer);
@@ -67,6 +70,26 @@ public class DiffEngine {
         List<Op> ops = myers(a, b); // EQUAL/DELETE/INSERT runs
         List<Hunk> hunks = coalesceToHunks(ops);
         return new Result(hunks);
+    }
+    /**
+     * Post-process hunks to prefer insert/delete alignment inside changes.
+     */
+    public static Result refineChanges(Result base, String leftText, String rightText) {
+        List<String> Lorig = splitFast(leftText);
+        List<String> Rorig = splitFast(rightText);
+        List<Hunk> refined = refineChangeHunks(base.hunks, Lorig, Rorig);
+        // Fallback: if still change-like, split into pure delete/insert blocks to avoid rewrites.
+        refined = explodeChangeAsDeleteInsert(refined);
+        if (DebugLog.isEnabled()) {
+            DebugLog.log("RefineChanges: base=%d refined=%d", base.hunks.size(), refined.size());
+            if (refined.size() <= 50) {
+                DebugLog.log("Refined hunks:");
+                for (Hunk h : refined) {
+                    DebugLog.log("  %s", h);
+                }
+            }
+        }
+        return new Result(refined);
     }
 
     private static List<String> normalizeList(List<String> src, java.util.function.Function<String, String> norm) {
@@ -333,5 +356,135 @@ public class DiffEngine {
             i = i + 1;
         }
         return hunks;
+    }
+
+    /**
+     * Split CHANGE hunks into finer INSERT/DELETE/EQUAL runs using LCS within each change block.
+     * This prefers insert/delete gaps over broad rewrites when lines simply go missing/appear.
+     */
+    private static List<Hunk> refineChangeHunks(List<Hunk> hunks, List<String> leftLines, List<String> rightLines) {
+        List<Hunk> out = new ArrayList<>();
+        int i = 0;
+        int n = hunks.size();
+        while (i < n) {
+            Hunk h = hunks.get(i);
+            if (h.type() != HunkType.CHANGE) {
+                out.add(h);
+                i = i + 1;
+                continue;
+            }
+
+            List<String> lSeg = sliceLines(leftLines, h.leftStart(), h.leftEnd());
+            List<String> rSeg = sliceLines(rightLines, h.rightStart(), h.rightEnd());
+            List<int[]> matches = lcsMatches(lSeg, rSeg);
+
+            int lBase = h.leftStart();
+            int rBase = h.rightStart();
+            int prevL = 0;
+            int prevR = 0;
+
+            int mIdx = 0;
+            int mCount = matches.size();
+            while (mIdx < mCount) {
+                int[] pair = matches.get(mIdx);
+                int ml = pair[0];
+                int mr = pair[1];
+
+                if (ml > prevL) {
+                    out.add(new Hunk(HunkType.DELETE, lBase + prevL, lBase + ml, rBase + prevR, rBase + prevR));
+                }
+                if (mr > prevR) {
+                    out.add(new Hunk(HunkType.INSERT, lBase + prevL, lBase + prevL, rBase + prevR, rBase + mr));
+                }
+                out.add(new Hunk(HunkType.EQUAL, lBase + ml, lBase + ml + 1, rBase + mr, rBase + mr + 1));
+
+                prevL = ml + 1;
+                prevR = mr + 1;
+                mIdx = mIdx + 1;
+            }
+
+            if (h.leftEnd() > lBase + prevL) {
+                out.add(new Hunk(HunkType.DELETE, lBase + prevL, h.leftEnd(), rBase + prevR, rBase + prevR));
+            }
+            if (h.rightEnd() > rBase + prevR) {
+                out.add(new Hunk(HunkType.INSERT, lBase + prevL, lBase + prevL, rBase + prevR, h.rightEnd()));
+            }
+
+            i = i + 1;
+        }
+        return out;
+    }
+
+    private static List<String> sliceLines(List<String> src, int start, int end) {
+        List<String> out = new ArrayList<>();
+        int i = start;
+        int n = Math.min(end, src.size());
+        while (i < n) {
+            out.add(src.get(i));
+            i = i + 1;
+        }
+        return out;
+    }
+
+    /**
+     * If any CHANGE hunks remain, explode them into DELETE+INSERT so insert-mode never rewrites.
+     */
+    private static List<Hunk> explodeChangeAsDeleteInsert(List<Hunk> hunks) {
+        List<Hunk> out = new ArrayList<>();
+        int i = 0;
+        int n = hunks.size();
+        while (i < n) {
+            Hunk h = hunks.get(i);
+            if (h.type() != HunkType.CHANGE) {
+                out.add(h);
+                i = i + 1;
+                continue;
+            }
+            if (h.leftStart() < h.leftEnd()) {
+                out.add(new Hunk(HunkType.DELETE, h.leftStart(), h.leftEnd(), h.rightStart(), h.rightStart()));
+            }
+            if (h.rightStart() < h.rightEnd()) {
+                out.add(new Hunk(HunkType.INSERT, h.leftEnd(), h.leftEnd(), h.rightStart(), h.rightEnd()));
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    private static List<int[]> lcsMatches(List<String> a, List<String> b) {
+        int n = a.size();
+        int m = b.size();
+        int[][] dp = new int[n + 1][m + 1];
+        int i = n - 1;
+        while (i >= 0) {
+            int j = m - 1;
+            while (j >= 0) {
+                if (a.get(i).equals(b.get(j))) {
+                    dp[i][j] = 1 + dp[i + 1][j + 1];
+                } else {
+                    dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+                }
+                j = j - 1;
+            }
+            i = i - 1;
+        }
+
+        List<int[]> pairs = new ArrayList<>();
+        int ia = 0;
+        int ib = 0;
+        while (ia < n && ib < m) {
+            if (a.get(ia).equals(b.get(ib))) {
+                pairs.add(new int[]{ia, ib});
+                ia = ia + 1;
+                ib = ib + 1;
+            } else {
+                if (dp[ia + 1][ib] >= dp[ia][ib + 1]) {
+                    ia = ia + 1;
+                } else {
+                    ib = ib + 1;
+                }
+            }
+        }
+        return pairs;
     }
 }
